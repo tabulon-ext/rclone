@@ -753,7 +753,8 @@ func (f *File) Truncate(size int64) (err error) {
 		fs.Debugf(f.Path(), "Truncating %d file handles", len(writers))
 		for _, h := range writers {
 			truncateErr := h.Truncate(size)
-			if truncateErr != nil {
+			// Ignore ECLOSED since file handle can get closed while this is running
+			if truncateErr != nil && truncateErr != ECLOSED {
 				err = truncateErr
 			}
 		}
