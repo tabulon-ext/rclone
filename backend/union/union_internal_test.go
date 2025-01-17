@@ -4,8 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
-	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -20,19 +19,12 @@ import (
 )
 
 // MakeTestDirs makes directories in /tmp for testing
-func MakeTestDirs(t *testing.T, n int) (dirs []string, clean func()) {
+func MakeTestDirs(t *testing.T, n int) (dirs []string) {
 	for i := 1; i <= n; i++ {
-		dir, err := ioutil.TempDir("", fmt.Sprintf("rclone-union-test-%d", n))
-		require.NoError(t, err)
+		dir := t.TempDir()
 		dirs = append(dirs, dir)
 	}
-	clean = func() {
-		for _, dir := range dirs {
-			err := os.RemoveAll(dir)
-			assert.NoError(t, err)
-		}
-	}
-	return dirs, clean
+	return dirs
 }
 
 func (f *Fs) TestInternalReadOnly(t *testing.T) {
@@ -47,7 +39,7 @@ func (f *Fs) TestInternalReadOnly(t *testing.T) {
 	// Put a file onto the read only fs
 	contents := random.String(50)
 	file1 := fstest.NewItem(dir+"/file.txt", contents, time.Now())
-	_, obj1 := fstests.PutTestContents(ctx, t, rofs, &file1, contents, true)
+	obj1 := fstests.PutTestContents(ctx, t, rofs, &file1, contents, true)
 
 	// Check read from readonly fs via union
 	o, err := f.NewObject(ctx, file1.Path)
@@ -95,8 +87,7 @@ func TestMoveCopy(t *testing.T) {
 		t.Skip("Skipping as -remote set")
 	}
 	ctx := context.Background()
-	dirs, clean := MakeTestDirs(t, 1)
-	defer clean()
+	dirs := MakeTestDirs(t, 1)
 	fsString := fmt.Sprintf(":union,upstreams='%s :memory:bucket':", dirs[0])
 	f, err := fs.NewFs(ctx, fsString)
 	require.NoError(t, err)
@@ -104,6 +95,12 @@ func TestMoveCopy(t *testing.T) {
 	unionFs := f.(*Fs)
 	fLocal := unionFs.upstreams[0].Fs
 	fMemory := unionFs.upstreams[1].Fs
+
+	if runtime.GOOS == "darwin" {
+		// need to disable as this test specifically tests a local that can't Copy
+		f.Features().Disable("Copy")
+		fLocal.Features().Disable("Copy")
+	}
 
 	t.Run("Features", func(t *testing.T) {
 		assert.NotNil(t, f.Features().Move)
@@ -119,14 +116,14 @@ func TestMoveCopy(t *testing.T) {
 	// Put a file onto the local fs
 	contentsLocal := random.String(50)
 	fileLocal := fstest.NewItem("local.txt", contentsLocal, time.Now())
-	_, _ = fstests.PutTestContents(ctx, t, fLocal, &fileLocal, contentsLocal, true)
+	_ = fstests.PutTestContents(ctx, t, fLocal, &fileLocal, contentsLocal, true)
 	objLocal, err := f.NewObject(ctx, fileLocal.Path)
 	require.NoError(t, err)
 
 	// Put a file onto the memory fs
 	contentsMemory := random.String(60)
 	fileMemory := fstest.NewItem("memory.txt", contentsMemory, time.Now())
-	_, _ = fstests.PutTestContents(ctx, t, fMemory, &fileMemory, contentsMemory, true)
+	_ = fstests.PutTestContents(ctx, t, fMemory, &fileMemory, contentsMemory, true)
 	objMemory, err := f.NewObject(ctx, fileMemory.Path)
 	require.NoError(t, err)
 

@@ -1,5 +1,4 @@
-//go:build windows
-// +build windows
+//go:build windows && !go1.22
 
 package file
 
@@ -11,8 +10,9 @@ import (
 
 // MkdirAll creates a directory named path, along with any necessary parents.
 //
-// Improves os.MkdirAll by avoiding trying to create a folder \\? when the
-// volume of a given extended length path does not exist.
+// Improves os.MkdirAll by avoiding trying to create a folder `\\?` when the
+// volume of a given extended length path does not exist, and `\\?\UNC` when
+// a network host name does not exist.
 //
 // Based on source code from golang's os.MkdirAll
 // (https://github.com/golang/go/blob/master/src/os/path.go)
@@ -37,13 +37,12 @@ func MkdirAll(path string, perm os.FileMode) error {
 	}
 	if i > 0 {
 		path = path[:i]
-
 		if path == filepath.VolumeName(path) {
 			// Make reference to a drive's root directory include the trailing slash.
 			// In extended-length form without trailing slash ("\\?\C:"), os.Stat
 			// and os.Mkdir both fails. With trailing slash ("\\?\C:\") works,
 			// and regular paths with or without it ("C:" and "C:\") both works.
-			path = path + string(os.PathSeparator)
+			path += string(os.PathSeparator)
 		} else {
 			// See if there is a parent to be created first.
 			// Not when path refer to a drive's root directory, because we don't
@@ -53,10 +52,12 @@ func MkdirAll(path string, perm os.FileMode) error {
 				j--
 			}
 			if j > 1 {
-				// Create parent.
-				err = MkdirAll(path[:j-1], perm)
-				if err != nil {
-					return err
+				if path[:j-1] != `\\?\UNC` && path[:j-1] != `\\?` {
+					// Create parent.
+					err = MkdirAll(path[:j-1], perm)
+					if err != nil {
+						return err
+					}
 				}
 			}
 		}

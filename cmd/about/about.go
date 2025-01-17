@@ -1,3 +1,4 @@
+// Package about provides the about command.
 package about
 
 import (
@@ -21,8 +22,8 @@ var (
 func init() {
 	cmd.Root.AddCommand(commandDefinition)
 	cmdFlags := commandDefinition.Flags()
-	flags.BoolVarP(cmdFlags, &jsonOutput, "json", "", false, "Format output as JSON")
-	flags.BoolVarP(cmdFlags, &fullOutput, "full", "", false, "Full numbers instead of human-readable")
+	flags.BoolVarP(cmdFlags, &jsonOutput, "json", "", false, "Format output as JSON", "")
+	flags.BoolVarP(cmdFlags, &fullOutput, "full", "", false, "Full numbers instead of human-readable", "")
 }
 
 // printValue formats uv to be output
@@ -45,8 +46,7 @@ func printValue(what string, uv *int64, isSize bool) {
 var commandDefinition = &cobra.Command{
 	Use:   "about remote:",
 	Short: `Get quota information from the remote.`,
-	Long: `
-` + "`rclone about`" + ` prints quota information about a remote to standard
+	Long: `Prints quota information about a remote to standard
 output. The output is typically used, free, quota and trash contents.
 
 E.g. Typical output from ` + "`rclone about remote:`" + ` is:
@@ -92,6 +92,10 @@ provided by a backend. Where the value is unlimited it is omitted.
 Some backends does not support the ` + "`rclone about`" + ` command at all,
 see complete list in [documentation](https://rclone.org/overview/#optional-features).
 `,
+	Annotations: map[string]string{
+		"versionIntroduced": "v1.41",
+		// "groups":            "",
+	},
 	Run: func(command *cobra.Command, args []string) {
 		cmd.CheckArgs(1, 1, command, args)
 		f := cmd.NewFsSrc(args)
@@ -102,7 +106,7 @@ see complete list in [documentation](https://rclone.org/overview/#optional-featu
 			}
 			u, err := doAbout(context.Background())
 			if err != nil {
-				return fmt.Errorf("About call failed: %w", err)
+				return fmt.Errorf("about call failed: %w", err)
 			}
 			if u == nil {
 				return errors.New("nil usage returned")

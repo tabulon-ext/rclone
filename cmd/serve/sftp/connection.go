@@ -1,5 +1,4 @@
 //go:build !plan9
-// +build !plan9
 
 package sftp
 
@@ -18,7 +17,7 @@ import (
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/lib/terminal"
 	"github.com/rclone/rclone/vfs"
-	"github.com/rclone/rclone/vfs/vfsflags"
+	"github.com/rclone/rclone/vfs/vfscommon"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -43,7 +42,7 @@ var shellUnEscapeRegex = regexp.MustCompile(`\\(.)`)
 
 // Unescape a string that was escaped by rclone
 func shellUnEscape(str string) string {
-	str = strings.Replace(str, "'\n'", "\n", -1)
+	str = strings.ReplaceAll(str, "'\n'", "\n")
 	str = shellUnEscapeRegex.ReplaceAllString(str, `$1`)
 	return str
 }
@@ -74,7 +73,7 @@ func (c *conn) execCommand(ctx context.Context, out io.Writer, command string) (
 		}
 		usage, err := about(ctx)
 		if err != nil {
-			return fmt.Errorf("About failed: %w", err)
+			return fmt.Errorf("about failed: %w", err)
 		}
 		total, used, free := int64(-1), int64(-1), int64(-1)
 		if usage.Total != nil {
@@ -101,6 +100,9 @@ func (c *conn) execCommand(ctx context.Context, out io.Writer, command string) (
 		if binary == "sha1sum" {
 			ht = hash.SHA1
 		}
+		if !c.vfs.Fs().Hashes().Contains(ht) {
+			return fmt.Errorf("%v hash not supported", ht)
+		}
 		var hashSum string
 		if args == "" {
 			// empty hash for no input
@@ -120,11 +122,28 @@ func (c *conn) execCommand(ctx context.Context, out io.Writer, command string) (
 			}
 			o, ok := node.DirEntry().(fs.ObjectInfo)
 			if !ok {
-				return errors.New("unexpected non file")
-			}
-			hashSum, err = o.Hash(ctx, ht)
-			if err != nil {
-				return fmt.Errorf("hash failed: %w", err)
+				fs.Debugf(args, "File uploading - reading hash from VFS cache")
+				in, err := node.Open(os.O_RDONLY)
+				if err != nil {
+					return fmt.Errorf("hash vfs open failed: %w", err)
+				}
+				defer func() {
+					_ = in.Close()
+				}()
+				h, err := hash.NewMultiHasherTypes(hash.NewHashSet(ht))
+				if err != nil {
+					return fmt.Errorf("hash vfs create multi-hasher failed: %w", err)
+				}
+				_, err = io.Copy(h, in)
+				if err != nil {
+					return fmt.Errorf("hash vfs copy failed: %w", err)
+				}
+				hashSum = h.Sums()[ht]
+			} else {
+				hashSum, err = o.Hash(ctx, ht)
+				if err != nil {
+					return fmt.Errorf("hash failed: %w", err)
+				}
 			}
 		}
 		_, err = fmt.Fprintf(out, "%s  %s\n", hashSum, args)
@@ -132,7 +151,13 @@ func (c *conn) execCommand(ctx context.Context, out io.Writer, command string) (
 			return fmt.Errorf("send output failed: %w", err)
 		}
 	case "echo":
-		// special cases for rclone command detection
+		// Special cases for legacy rclone command detection.
+		// Before rclone v1.49.0 the sftp backend used "echo 'abc' | md5sum" when
+		// detecting hash support, but was then changed to instead just execute
+		// md5sum/sha1sum (without arguments), which is handled above. The following
+		// code is therefore only necessary to support rclone versions older than
+		// v1.49.0 using a sftp remote connected to a rclone serve sftp instance
+		// running a newer version of rclone (e.g. latest).
 		switch args {
 		case "'abc' | md5sum":
 			if c.vfs.Fs().Hashes().Contains(hash.MD5) {
@@ -282,7 +307,7 @@ func serveStdio(f fs.Fs) error {
 		stdin:  os.Stdin,
 		stdout: os.Stdout,
 	}
-	handlers := newVFSHandler(vfs.New(f, &vfsflags.Opt))
+	handlers := newVFSHandler(vfs.New(f, &vfscommon.Opt))
 	return serveChannel(sshChannel, handlers, "stdio")
 }
 

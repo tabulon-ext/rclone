@@ -1,6 +1,6 @@
 //go:build !plan9 && !js
-// +build !plan9,!js
 
+// Package cache implements a virtual provider to cache existing remotes.
 package cache
 
 import (
@@ -75,17 +75,19 @@ func init() {
 			Name: "plex_url",
 			Help: "The URL of the Plex server.",
 		}, {
-			Name: "plex_username",
-			Help: "The username of the Plex user.",
+			Name:      "plex_username",
+			Help:      "The username of the Plex user.",
+			Sensitive: true,
 		}, {
 			Name:       "plex_password",
 			Help:       "The password of the Plex user.",
 			IsPassword: true,
 		}, {
-			Name:     "plex_token",
-			Help:     "The plex token for authentication - auto set normally.",
-			Hide:     fs.OptionHideBoth,
-			Advanced: true,
+			Name:      "plex_token",
+			Help:      "The plex token for authentication - auto set normally.",
+			Hide:      fs.OptionHideBoth,
+			Advanced:  true,
+			Sensitive: true,
 		}, {
 			Name:     "plex_insecure",
 			Help:     "Skip all certificate verification when connecting to the Plex server.",
@@ -394,7 +396,11 @@ func NewFs(ctx context.Context, name, rootPath string, m configmap.Mapper) (fs.F
 		notifiedRemotes:  make(map[string]bool),
 	}
 	cache.PinUntilFinalized(f.Fs, f)
-	f.rateLimiter = rate.NewLimiter(rate.Limit(float64(opt.Rps)), opt.TotalWorkers)
+	rps := rate.Inf
+	if opt.Rps > 0 {
+		rps = rate.Limit(float64(opt.Rps))
+	}
+	f.rateLimiter = rate.NewLimiter(rps, opt.TotalWorkers)
 
 	f.plexConnector = &plexConnector{}
 	if opt.PlexURL != "" {
@@ -403,18 +409,16 @@ func NewFs(ctx context.Context, name, rootPath string, m configmap.Mapper) (fs.F
 			if err != nil {
 				return nil, fmt.Errorf("failed to connect to the Plex API %v: %w", opt.PlexURL, err)
 			}
-		} else {
-			if opt.PlexPassword != "" && opt.PlexUsername != "" {
-				decPass, err := obscure.Reveal(opt.PlexPassword)
-				if err != nil {
-					decPass = opt.PlexPassword
-				}
-				f.plexConnector, err = newPlexConnector(f, opt.PlexURL, opt.PlexUsername, decPass, opt.PlexInsecure, func(token string) {
-					m.Set("plex_token", token)
-				})
-				if err != nil {
-					return nil, fmt.Errorf("failed to connect to the Plex API %v: %w", opt.PlexURL, err)
-				}
+		} else if opt.PlexPassword != "" && opt.PlexUsername != "" {
+			decPass, err := obscure.Reveal(opt.PlexPassword)
+			if err != nil {
+				decPass = opt.PlexPassword
+			}
+			f.plexConnector, err = newPlexConnector(f, opt.PlexURL, opt.PlexUsername, decPass, opt.PlexInsecure, func(token string) {
+				m.Set("plex_token", token)
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to connect to the Plex API %v: %w", opt.PlexURL, err)
 			}
 		}
 	}
@@ -1033,7 +1037,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 		}
 		fs.Debugf(dir, "list: remove entry: %v", entryRemote)
 	}
-	entries = nil
+	entries = nil //nolint:ineffassign
 
 	// and then iterate over the ones from source (temp Objects will override source ones)
 	var batchDirectories []*Directory
@@ -1124,7 +1128,7 @@ func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (
 				case fs.Directory:
 					_ = f.cache.AddDir(DirectoryFromOriginal(ctx, f, o))
 				default:
-					return fmt.Errorf("Unknown object type %T", entry)
+					return fmt.Errorf("unknown object type %T", entry)
 				}
 			}
 
@@ -1743,7 +1747,7 @@ func (f *Fs) CleanUp(ctx context.Context) error {
 func (f *Fs) About(ctx context.Context) (*fs.Usage, error) {
 	do := f.Fs.Features().About
 	if do == nil {
-		return nil, errors.New("About not supported")
+		return nil, errors.New("not supported by underlying remote")
 	}
 	return do(ctx)
 }
@@ -1782,7 +1786,7 @@ func (f *Fs) CleanUpCache(ignoreLastTs bool) {
 	}
 }
 
-// StopBackgroundRunners will signall all the runners to stop their work
+// StopBackgroundRunners will signal all the runners to stop their work
 // can be triggered from a terminate signal or from testing between runs
 func (f *Fs) StopBackgroundRunners() {
 	f.cleanupChan <- false

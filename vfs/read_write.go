@@ -30,10 +30,20 @@ type RWFileHandle struct {
 	writeCalled bool // if any Write() methods have been called
 }
 
+// Lock performs Unix locking, not supported
+func (fh *RWFileHandle) Lock() error {
+	return os.ErrInvalid
+}
+
+// Unlock performs Unix unlocking, not supported
+func (fh *RWFileHandle) Unlock() error {
+	return os.ErrInvalid
+}
+
 func newRWFileHandle(d *Dir, f *File, flags int) (fh *RWFileHandle, err error) {
 	defer log.Trace(f.Path(), "")("err=%v", &err)
 	// get an item to represent this from the cache
-	item := d.vfs.cache.Item(f.Path())
+	item := d.vfs.cache.Item(f.CachePath())
 
 	exists := f.exists() || (item.Exists() && !item.WrittenBack())
 
@@ -139,7 +149,7 @@ func (fh *RWFileHandle) updateSize() {
 // close the file handle returning EBADF if it has been
 // closed already.
 //
-// Must be called with fh.mu held
+// Must be called with fh.mu held.
 //
 // Note that we leave the file around in the cache on error conditions
 // to give the user a chance to recover it.

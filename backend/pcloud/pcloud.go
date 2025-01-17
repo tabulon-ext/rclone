@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/rclone/rclone/fs/config/configstruct"
 	"github.com/rclone/rclone/fs/config/obscure"
 	"github.com/rclone/rclone/fs/fserrors"
+	"github.com/rclone/rclone/fs/fshttp"
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/fs/walk"
 	"github.com/rclone/rclone/lib/dircache"
@@ -46,12 +48,10 @@ const (
 // Globals
 var (
 	// Description of how to auth for this app
-	oauthConfig = &oauth2.Config{
-		Scopes: nil,
-		Endpoint: oauth2.Endpoint{
-			AuthURL: "https://my.pcloud.com/oauth2/authorize",
-			// TokenURL: "https://api.pcloud.com/oauth2_token", set by updateTokenURL
-		},
+	oauthConfig = &oauthutil.Config{
+		Scopes:  nil,
+		AuthURL: "https://my.pcloud.com/oauth2/authorize",
+		// TokenURL: "https://api.pcloud.com/oauth2_token", set by updateTokenURL
 		ClientID:     rcloneClientID,
 		ClientSecret: obscure.MustReveal(rcloneEncryptedClientSecret),
 		RedirectURL:  oauthutil.RedirectLocalhostURL,
@@ -59,8 +59,8 @@ var (
 )
 
 // Update the TokenURL with the actual hostname
-func updateTokenURL(oauthConfig *oauth2.Config, hostname string) {
-	oauthConfig.Endpoint.TokenURL = "https://" + hostname + "/oauth2_token"
+func updateTokenURL(oauthConfig *oauthutil.Config, hostname string) {
+	oauthConfig.TokenURL = "https://" + hostname + "/oauth2_token"
 }
 
 // Register with Fs
@@ -77,7 +77,7 @@ func init() {
 				fs.Errorf(nil, "Failed to read config: %v", err)
 			}
 			updateTokenURL(oauthConfig, optc.Hostname)
-			checkAuth := func(oauthConfig *oauth2.Config, auth *oauthutil.AuthResult) error {
+			checkAuth := func(oauthConfig *oauthutil.Config, auth *oauthutil.AuthResult) error {
 				if auth == nil || auth.Form == nil {
 					return errors.New("form not found in response")
 				}
@@ -109,10 +109,11 @@ func init() {
 				encoder.EncodeBackSlash |
 				encoder.EncodeInvalidUtf8),
 		}, {
-			Name:     "root_folder_id",
-			Help:     "Fill in for rclone to use a non root folder as its starting point.",
-			Default:  "d0",
-			Advanced: true,
+			Name:      "root_folder_id",
+			Help:      "Fill in for rclone to use a non root folder as its starting point.",
+			Default:   "d0",
+			Advanced:  true,
+			Sensitive: true,
 		}, {
 			Name: "hostname",
 			Help: `Hostname to connect to.
@@ -130,7 +131,22 @@ with rclone authorize.
 				Value: "eapi.pcloud.com",
 				Help:  "EU region",
 			}},
-		}}...),
+		}, {
+			Name: "username",
+			Help: `Your pcloud username.
+			
+This is only required when you want to use the cleanup command. Due to a bug
+in the pcloud API the required API does not support OAuth authentication so
+we have to rely on user password authentication for it.`,
+			Advanced:  true,
+			Sensitive: true,
+		}, {
+			Name:       "password",
+			Help:       "Your pcloud password.",
+			IsPassword: true,
+			Advanced:   true,
+		},
+		}...),
 	})
 }
 
@@ -139,18 +155,22 @@ type Options struct {
 	Enc          encoder.MultiEncoder `config:"encoding"`
 	RootFolderID string               `config:"root_folder_id"`
 	Hostname     string               `config:"hostname"`
+	Username     string               `config:"username"`
+	Password     string               `config:"password"`
 }
 
 // Fs represents a remote pcloud
 type Fs struct {
-	name         string             // name of this remote
-	root         string             // the path we are working on
-	opt          Options            // parsed options
-	features     *fs.Features       // optional features
-	srv          *rest.Client       // the connection to the server
-	dirCache     *dircache.DirCache // Map of directory path to directory id
-	pacer        *fs.Pacer          // pacer for API calls
-	tokenRenewer *oauthutil.Renew   // renew the token on expiry
+	name         string                 // name of this remote
+	root         string                 // the path we are working on
+	opt          Options                // parsed options
+	features     *fs.Features           // optional features
+	ts           *oauthutil.TokenSource // the token source, used to create new clients
+	srv          *rest.Client           // the connection to the server
+	cleanupSrv   *rest.Client           // the connection used for the cleanup method
+	dirCache     *dircache.DirCache     // Map of directory path to directory id
+	pacer        *fs.Pacer              // pacer for API calls
+	tokenRenewer *oauthutil.Renew       // renew the token on expiry
 }
 
 // Object describes a pcloud object
@@ -227,7 +247,7 @@ func shouldRetry(ctx context.Context, resp *http.Response, err error) (bool, err
 		}
 	}
 
-	if resp != nil && resp.StatusCode == 401 && len(resp.Header["Www-Authenticate"]) == 1 && strings.Index(resp.Header["Www-Authenticate"][0], "expired_token") >= 0 {
+	if resp != nil && resp.StatusCode == 401 && len(resp.Header["Www-Authenticate"]) == 1 && strings.Contains(resp.Header["Www-Authenticate"][0], "expired_token") {
 		doRetry = true
 		fs.Debugf(nil, "Should retry: %v", err)
 	}
@@ -293,21 +313,30 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	}
 	updateTokenURL(oauthConfig, opt.Hostname)
 
+	canCleanup := opt.Username != "" && opt.Password != ""
 	f := &Fs{
 		name:  name,
 		root:  root,
 		opt:   *opt,
+		ts:    ts,
 		srv:   rest.NewClient(oAuthClient).SetRoot("https://" + opt.Hostname),
 		pacer: fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
+	}
+	if canCleanup {
+		f.cleanupSrv = rest.NewClient(fshttp.NewClient(ctx)).SetRoot("https://" + opt.Hostname)
 	}
 	f.features = (&fs.Features{
 		CaseInsensitive:         false,
 		CanHaveEmptyDirectories: true,
+		PartialUploads:          true,
 	}).Fill(ctx, f)
+	if !canCleanup {
+		f.features.CleanUp = nil
+	}
 	f.srv.SetErrorHandler(errorHandler)
 
 	// Renew the token in the background
-	f.tokenRenewer = oauthutil.NewRenew(f.String(), ts, func() error {
+	f.tokenRenewer = oauthutil.NewRenew(f.String(), f.ts, func() error {
 		_, err := f.readMetaDataForPath(ctx, "")
 		return err
 	})
@@ -347,6 +376,57 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		return f, fs.ErrorIsFile
 	}
 	return f, nil
+}
+
+// OpenWriterAt opens with a handle for random access writes
+//
+// Pass in the remote desired and the size if known.
+//
+// It truncates any existing object
+func (f *Fs) OpenWriterAt(ctx context.Context, remote string, size int64) (fs.WriterAtCloser, error) {
+	client, err := f.newSingleConnClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("create client: %w", err)
+	}
+	// init an empty file
+	leaf, directoryID, err := f.dirCache.FindPath(ctx, remote, true)
+	if err != nil {
+		return nil, fmt.Errorf("resolve src: %w", err)
+	}
+	openResult, err := fileOpenNew(ctx, client, f, directoryID, leaf)
+	if err != nil {
+		return nil, fmt.Errorf("open file: %w", err)
+	}
+	if _, err := fileClose(ctx, client, f.pacer, openResult.FileDescriptor); err != nil {
+		return nil, fmt.Errorf("close file: %w", err)
+	}
+
+	writer := &writerAt{
+		ctx:    ctx,
+		fs:     f,
+		size:   size,
+		remote: remote,
+		fileID: openResult.Fileid,
+	}
+
+	return writer, nil
+}
+
+// Create a new http client, accepting keep-alive headers, limited to single connection.
+// Necessary for pcloud fileops API, as it binds the session to the underlying TCP connection.
+// File descriptors are only valid within the same connection and auto-closed when the connection is closed,
+// hence we need a separate client (with single connection) for each fd to avoid all sorts of errors and race conditions.
+func (f *Fs) newSingleConnClient(ctx context.Context) (*rest.Client, error) {
+	baseClient := fshttp.NewClient(ctx)
+	baseClient.Transport = fshttp.NewTransportCustom(ctx, func(t *http.Transport) {
+		t.MaxConnsPerHost = 1
+		t.DisableKeepAlives = false
+	})
+	// Set our own http client in the context
+	ctx = oauthutil.Context(ctx, baseClient)
+	// create a new oauth client, reuse the token source
+	oAuthClient := oauth2.NewClient(ctx, f.ts)
+	return rest.NewClient(oAuthClient).SetRoot("https://" + f.opt.Hostname), nil
 }
 
 // Return an Object from a path
@@ -564,7 +644,7 @@ func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (
 // Creates from the parameters passed in a half finished Object which
 // must have setMetaData called on it
 //
-// Returns the object, leaf, directoryID and error
+// Returns the object, leaf, directoryID and error.
 //
 // Used to create new objects
 func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time, size int64) (o *Object, leaf string, directoryID string, err error) {
@@ -583,7 +663,7 @@ func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time,
 
 // Put the object into the container
 //
-// Copy the reader in to the new object which is returned
+// Copy the reader in to the new object which is returned.
 //
 // The new object may have been created if an error is returned
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
@@ -657,9 +737,9 @@ func (f *Fs) Precision() time.Duration {
 
 // Copy src to this remote using server-side copy operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -690,7 +770,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	opts.Parameters.Set("fileid", fileIDtoNumber(srcObj.id))
 	opts.Parameters.Set("toname", f.opt.Enc.FromStandardName(leaf))
 	opts.Parameters.Set("tofolderid", dirIDtoNumber(directoryID))
-	opts.Parameters.Set("mtime", fmt.Sprintf("%d", srcObj.modTime.Unix()))
+	opts.Parameters.Set("mtime", fmt.Sprintf("%d", uint64(srcObj.modTime.Unix())))
 	var resp *http.Response
 	var result api.ItemResult
 	err = f.pacer.Call(func() (bool, error) {
@@ -729,10 +809,12 @@ func (f *Fs) CleanUp(ctx context.Context) error {
 		Parameters: url.Values{},
 	}
 	opts.Parameters.Set("folderid", dirIDtoNumber(rootID))
+	opts.Parameters.Set("username", f.opt.Username)
+	opts.Parameters.Set("password", obscure.MustReveal(f.opt.Password))
 	var resp *http.Response
 	var result api.Error
 	return f.pacer.Call(func() (bool, error) {
-		resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
+		resp, err = f.cleanupSrv.CallJSON(ctx, &opts, nil, &result)
 		err = result.Update(err)
 		return shouldRetry(ctx, resp, err)
 	})
@@ -740,9 +822,9 @@ func (f *Fs) CleanUp(ctx context.Context) error {
 
 // Move src to this remote using server-side move operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -906,14 +988,24 @@ func (f *Fs) About(ctx context.Context) (usage *fs.Usage, err error) {
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("about failed: %w", err)
+		return nil, err
+	}
+	free := q.Quota - q.UsedQuota
+	if free < 0 {
+		free = 0
 	}
 	usage = &fs.Usage{
-		Total: fs.NewUsageValue(q.Quota),               // quota of bytes that can be used
-		Used:  fs.NewUsageValue(q.UsedQuota),           // bytes in use
-		Free:  fs.NewUsageValue(q.Quota - q.UsedQuota), // bytes which can be uploaded before reaching the quota
+		Total: fs.NewUsageValue(q.Quota),     // quota of bytes that can be used
+		Used:  fs.NewUsageValue(q.UsedQuota), // bytes in use
+		Free:  fs.NewUsageValue(free),        // bytes which can be uploaded before reaching the quota
 	}
 	return usage, nil
+}
+
+// Shutdown shutdown the fs
+func (f *Fs) Shutdown(ctx context.Context) error {
+	f.tokenRenewer.Shutdown()
+	return nil
 }
 
 // Hashes returns the supported hash sets.
@@ -1043,7 +1135,6 @@ func (o *Object) readMetaData(ctx context.Context) (err error) {
 
 // ModTime returns the modification time of the object
 //
-//
 // It attempts to read the objects mtime and if that isn't present the
 // LastModified returned in the http headers
 func (o *Object) ModTime(ctx context.Context) time.Time {
@@ -1057,9 +1148,42 @@ func (o *Object) ModTime(ctx context.Context) time.Time {
 
 // SetModTime sets the modification time of the local fs object
 func (o *Object) SetModTime(ctx context.Context, modTime time.Time) error {
-	// Pcloud doesn't have a way of doing this so returning this
-	// error will cause the file to be re-uploaded to set the time.
-	return fs.ErrorCantSetModTime
+	filename, directoryID, err := o.fs.dirCache.FindPath(ctx, o.Remote(), true)
+	if err != nil {
+		return err
+	}
+	fileID := fileIDtoNumber(o.id)
+	filename = o.fs.opt.Enc.FromStandardName(filename)
+	opts := rest.Opts{
+		Method:           "PUT",
+		Path:             "/copyfile",
+		Parameters:       url.Values{},
+		TransferEncoding: []string{"identity"}, // pcloud doesn't like chunked encoding
+		ExtraHeaders: map[string]string{
+			"Connection": "keep-alive",
+		},
+	}
+	opts.Parameters.Set("fileid", fileID)
+	opts.Parameters.Set("folderid", dirIDtoNumber(directoryID))
+	opts.Parameters.Set("toname", filename)
+	opts.Parameters.Set("tofolderid", dirIDtoNumber(directoryID))
+	opts.Parameters.Set("ctime", strconv.FormatInt(modTime.Unix(), 10))
+	opts.Parameters.Set("mtime", strconv.FormatInt(modTime.Unix(), 10))
+
+	result := &api.ItemResult{}
+	err = o.fs.pacer.CallNoRetry(func() (bool, error) {
+		resp, err := o.fs.srv.CallJSON(ctx, &opts, nil, result)
+		err = result.Error.Update(err)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		return fmt.Errorf("update mtime: copyfile: %w", err)
+	}
+	if err := o.setMetaData(&result.Metadata); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Storable returns a boolean showing whether this object storable
@@ -1122,7 +1246,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 
 // Update the object with the contents of the io.Reader, modTime and size
 //
-// If existing is set then it updates the object rather than creating a new one
+// If existing is set then it updates the object rather than creating a new one.
 //
 // The new object may have been created if an error is returned
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
@@ -1171,7 +1295,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	opts.Parameters.Set("filename", leaf)
 	opts.Parameters.Set("folderid", dirIDtoNumber(directoryID))
 	opts.Parameters.Set("nopartial", "1")
-	opts.Parameters.Set("mtime", fmt.Sprintf("%d", modTime.Unix()))
+	opts.Parameters.Set("mtime", fmt.Sprintf("%d", uint64(modTime.Unix())))
 
 	// Special treatment for a 0 length upload.  This doesn't work
 	// with PUT even with Content-Length set (by setting
@@ -1249,6 +1373,7 @@ var (
 	_ fs.DirCacheFlusher = (*Fs)(nil)
 	_ fs.PublicLinker    = (*Fs)(nil)
 	_ fs.Abouter         = (*Fs)(nil)
+	_ fs.Shutdowner      = (*Fs)(nil)
 	_ fs.Object          = (*Object)(nil)
 	_ fs.IDer            = (*Object)(nil)
 )

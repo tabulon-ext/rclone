@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"sort"
 	"strconv"
@@ -29,7 +28,7 @@ var ReadLine = func() string {
 	buf := bufio.NewReader(os.Stdin)
 	line, err := buf.ReadString('\n')
 	if err != nil {
-		log.Fatalf("Failed to read line: %v", err)
+		fs.Fatalf(nil, "Failed to read line: %v", err)
 	}
 	return strings.TrimSpace(line)
 }
@@ -46,6 +45,9 @@ func ReadNonEmptyLine(prompt string) string {
 
 // CommandDefault - choose one.  If return is pressed then it will
 // chose the defaultIndex if it is >= 0
+//
+// Must not call fs.Log anything from here to avoid deadlock in
+// --interactive --progress
 func CommandDefault(commands []string, defaultIndex int) byte {
 	opts := []string{}
 	for i, text := range commands {
@@ -230,7 +232,7 @@ func ChoosePassword(defaultValue string, required bool) string {
 			bits := ChooseNumber("Bits", 64, 1024)
 			password, err = Password(bits)
 			if err != nil {
-				log.Fatalf("Failed to make password: %v", err)
+				fs.Fatalf(nil, "Failed to make password: %v", err)
 			}
 			fmt.Printf("Your password is: %s\n", password)
 			fmt.Printf("Use this password? Please note that an obscured version of this \npassword (and not the " +
@@ -277,7 +279,7 @@ func ShowRemotes() {
 	fmt.Printf("%-20s %s\n", "Name", "Type")
 	fmt.Printf("%-20s %s\n", "====", "====")
 	for _, remote := range remotes {
-		fmt.Printf("%-20s %s\n", remote, FileGet(remote, "type"))
+		fmt.Printf("%-20s %s\n", remote, GetValue(remote, "type"))
 	}
 }
 
@@ -285,45 +287,85 @@ func ShowRemotes() {
 func ChooseRemote() string {
 	remotes := LoadedData().GetSectionList()
 	sort.Strings(remotes)
+	fmt.Println("Select remote.")
 	return Choose("remote", "value", remotes, nil, "", true, false)
 }
 
 // mustFindByName finds the RegInfo for the remote name passed in or
 // exits with a fatal error.
 func mustFindByName(name string) *fs.RegInfo {
-	fsType := FileGet(name, "type")
+	fsType := GetValue(name, "type")
 	if fsType == "" {
-		log.Fatalf("Couldn't find type of fs for %q", name)
+		fs.Fatalf(nil, "Couldn't find type of fs for %q", name)
 	}
 	return fs.MustFind(fsType)
 }
 
-// ShowRemote shows the contents of the remote
-func ShowRemote(name string) {
-	fmt.Printf("--------------------\n")
-	fmt.Printf("[%s]\n", name)
-	fs := mustFindByName(name)
+// findByName finds the RegInfo for the remote name passed in or
+// returns an error
+func findByName(name string) (*fs.RegInfo, error) {
+	fsType := GetValue(name, "type")
+	if fsType == "" {
+		return nil, fmt.Errorf("couldn't find type of fs for %q", name)
+	}
+	return fs.Find(fsType)
+}
+
+// printRemoteOptions prints the options of the remote
+func printRemoteOptions(name string, prefix string, sep string, redacted bool) {
+	fsInfo, err := findByName(name)
+	if err != nil {
+		fmt.Printf("# %v\n", err)
+		fsInfo = nil
+	}
 	for _, key := range LoadedData().GetKeyList(name) {
 		isPassword := false
-		for _, option := range fs.Options {
-			if option.Name == key && option.IsPassword {
-				isPassword = true
-				break
+		isSensitive := false
+		if fsInfo != nil {
+			for _, option := range fsInfo.Options {
+				if option.Name == key {
+					if option.IsPassword {
+						isPassword = true
+					} else if option.Sensitive {
+						isSensitive = true
+					}
+				}
 			}
 		}
-		value := FileGet(name, key)
-		if isPassword && value != "" {
-			fmt.Printf("%s = *** ENCRYPTED ***\n", key)
+		value := GetValue(name, key)
+		if redacted && (isSensitive || isPassword) && value != "" {
+			fmt.Printf("%s%s%sXXX\n", prefix, key, sep)
+		} else if isPassword && value != "" {
+			fmt.Printf("%s%s%s*** ENCRYPTED ***\n", prefix, key, sep)
 		} else {
-			fmt.Printf("%s = %s\n", key, value)
+			fmt.Printf("%s%s%s%s\n", prefix, key, sep, value)
 		}
 	}
-	fmt.Printf("--------------------\n")
+}
+
+// listRemoteOptions lists the options of the remote
+func listRemoteOptions(name string) {
+	printRemoteOptions(name, "- ", ": ", false)
+}
+
+// ShowRemote shows the contents of the remote in config file format
+func ShowRemote(name string) {
+	fmt.Printf("[%s]\n", name)
+	printRemoteOptions(name, "", " = ", false)
+}
+
+// ShowRedactedRemote shows the contents of the remote in config file format
+func ShowRedactedRemote(name string) {
+	fmt.Printf("[%s]\n", name)
+	printRemoteOptions(name, "", " = ", true)
 }
 
 // OkRemote prints the contents of the remote and ask if it is OK
 func OkRemote(name string) bool {
-	ShowRemote(name)
+	fmt.Println("Configuration complete.")
+	fmt.Println("Options:")
+	listRemoteOptions(name)
+	fmt.Printf("Keep this %q remote?\n", name)
 	switch i := CommandDefault([]string{"yYes this is OK", "eEdit this remote", "dDelete this remote"}, 0); i {
 	case 'y':
 		return true
@@ -336,6 +378,11 @@ func OkRemote(name string) bool {
 		fs.Errorf(nil, "Bad choice %c", i)
 	}
 	return false
+}
+
+// newSection prints an empty line to separate sections
+func newSection() {
+	fmt.Println()
 }
 
 // backendConfig configures the backend starting from the state passed in
@@ -387,6 +434,7 @@ func backendConfig(ctx context.Context, name string, m configmap.Mapper, ri *fs.
 		if out.State == "" {
 			break
 		}
+		newSection()
 	}
 	return nil
 }
@@ -405,7 +453,7 @@ func PostConfig(ctx context.Context, name string, m configmap.Mapper, ri *fs.Reg
 func RemoteConfig(ctx context.Context, name string) error {
 	fmt.Printf("Remote config\n")
 	ri := mustFindByName(name)
-	m := fs.ConfigMap(ri, name, nil)
+	m := fs.ConfigMap(ri.Prefix, ri.Options, name, nil)
 	if ri.Config == nil {
 		return nil
 	}
@@ -417,7 +465,7 @@ func ChooseOption(o *fs.Option, name string) string {
 	fmt.Printf("Option %s.\n", o.Name)
 	if o.Help != "" {
 		// Show help string without empty lines.
-		help := strings.Replace(strings.TrimSpace(o.Help), "\n\n", "\n", -1)
+		help := strings.ReplaceAll(strings.TrimSpace(o.Help), "\n\n", "\n")
 		fmt.Println(help)
 	}
 
@@ -446,7 +494,7 @@ func ChooseOption(o *fs.Option, name string) string {
 		case uint, byte, uint16, uint32, uint64:
 			what = "unsigned integer"
 		default:
-			what = fmt.Sprintf("%T value", o.Default)
+			what = fmt.Sprintf("value of type %s", o.Type())
 		}
 	}
 	var in string
@@ -477,6 +525,7 @@ func ChooseOption(o *fs.Option, name string) string {
 // NewRemoteName asks the user for a name for a new remote
 func NewRemoteName() (name string) {
 	for {
+		fmt.Println("Enter name for new remote.")
 		fmt.Printf("name> ")
 		name = ReadLine()
 		if LoadedData().HasSection(name) {
@@ -516,7 +565,7 @@ func NewRemote(ctx context.Context, name string) error {
 		break
 	}
 	LoadedData().SetValue(name, "type", newType)
-
+	newSection()
 	_, err = CreateRemote(ctx, name, newType, nil, UpdateRemoteOpt{
 		All: true,
 	})
@@ -527,13 +576,15 @@ func NewRemote(ctx context.Context, name string) error {
 		SaveConfig()
 		return nil
 	}
+	newSection()
 	return EditRemote(ctx, ri, name)
 }
 
 // EditRemote gets the user to edit a remote
 func EditRemote(ctx context.Context, ri *fs.RegInfo, name string) error {
-	ShowRemote(name)
-	fmt.Printf("Edit remote\n")
+	fmt.Printf("Editing existing %q remote with options:\n", name)
+	listRemoteOptions(name)
+	newSection()
 	for {
 		_, err := UpdateRemote(ctx, name, nil, UpdateRemoteOpt{
 			All: true,
@@ -561,7 +612,7 @@ func copyRemote(name string) string {
 	newName := NewRemoteName()
 	// Copy the keys
 	for _, key := range LoadedData().GetKeyList(name) {
-		value := getWithDefault(name, key, "")
+		value, _ := FileGetValue(name, key)
 		LoadedData().SetValue(newName, key, value)
 	}
 	return newName
@@ -602,12 +653,28 @@ func ShowConfigLocation() {
 func ShowConfig() {
 	str, err := LoadedData().Serialize()
 	if err != nil {
-		log.Fatalf("Failed to serialize config: %v", err)
+		fs.Fatalf(nil, "Failed to serialize config: %v", err)
 	}
 	if str == "" {
 		str = "; empty config\n"
 	}
 	fmt.Printf("%s", str)
+}
+
+// ShowRedactedConfig prints the redacted (unencrypted) config options
+func ShowRedactedConfig() {
+	remotes := LoadedData().GetSectionList()
+	if len(remotes) == 0 {
+		fmt.Println("; empty config")
+		return
+	}
+	sort.Strings(remotes)
+	for i, remote := range remotes {
+		if i != 0 {
+			fmt.Println()
+		}
+		ShowRedactedRemote(remote)
+	}
 }
 
 // EditConfig edits the config file interactively
@@ -626,29 +693,44 @@ func EditConfig(ctx context.Context) (err error) {
 		}
 		switch i := Command(what); i {
 		case 'e':
+			newSection()
 			name := ChooseRemote()
+			newSection()
 			fs := mustFindByName(name)
 			err = EditRemote(ctx, fs, name)
 			if err != nil {
 				return err
 			}
 		case 'n':
-			err = NewRemote(ctx, NewRemoteName())
+			newSection()
+			name := NewRemoteName()
+			newSection()
+			err = NewRemote(ctx, name)
 			if err != nil {
 				return err
 			}
 		case 'd':
+			newSection()
 			name := ChooseRemote()
+			newSection()
 			DeleteRemote(name)
 		case 'r':
-			RenameRemote(ChooseRemote())
+			newSection()
+			name := ChooseRemote()
+			newSection()
+			RenameRemote(name)
 		case 'c':
-			CopyRemote(ChooseRemote())
+			newSection()
+			name := ChooseRemote()
+			newSection()
+			CopyRemote(name)
 		case 's':
+			newSection()
 			SetPassword()
 		case 'q':
 			return nil
 		}
+		newSection()
 	}
 }
 
@@ -714,13 +796,11 @@ func SetPassword() {
 			what := []string{"cChange Password", "uUnencrypt configuration", "qQuit to main menu"}
 			switch i := Command(what); i {
 			case 'c':
-				changeConfigPassword()
-				SaveConfig()
+				ChangeConfigPasswordAndSave()
 				fmt.Println("Password changed")
 				continue
 			case 'u':
-				configKey = nil
-				SaveConfig()
+				RemoveConfigPasswordAndSave()
 				continue
 			case 'q':
 				return
@@ -732,8 +812,7 @@ func SetPassword() {
 			what := []string{"aAdd Password", "qQuit to main menu"}
 			switch i := Command(what); i {
 			case 'a':
-				changeConfigPassword()
-				SaveConfig()
+				ChangeConfigPasswordAndSave()
 				fmt.Println("Password set")
 				continue
 			case 'q':

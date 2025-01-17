@@ -1,6 +1,7 @@
 ---
 title: "Remote Control / API"
 description: "Remote controlling rclone with its API"
+versionIntroduced: "v1.40"
 ---
 
 # Remote controlling rclone with its API
@@ -8,38 +9,45 @@ description: "Remote controlling rclone with its API"
 If rclone is run with the `--rc` flag then it starts an HTTP server
 which can be used to remote control rclone using its API.
 
-You can either use the [rclone rc](#api-rc) command to access the API
+You can either use the [rc](#api-rc) command to access the API
 or [use HTTP directly](#api-http).
 
-If you just want to run a remote control then see the [rcd command](/commands/rclone_rcd/).
+If you just want to run a remote control then see the [rcd](/commands/rclone_rcd/) command.
 
 ## Supported parameters
 
 ### --rc
 
-Flag to start the http server listen on remote requests
+Flag to start the http server listen on remote requests.
       
 ### --rc-addr=IP
 
-IPaddress:Port or :Port to bind server to. (default "localhost:5572")
+IPaddress:Port or :Port to bind server to. (default "localhost:5572").
 
 ### --rc-cert=KEY
-SSL PEM key (concatenation of certificate and CA certificate)
+
+SSL PEM key (concatenation of certificate and CA certificate).
 
 ### --rc-client-ca=PATH
-Client certificate authority to verify clients with
+
+Client certificate authority to verify clients with.
 
 ### --rc-htpasswd=PATH
 
-htpasswd file - if not provided no authentication is done
+htpasswd file - if not provided no authentication is done.
 
 ### --rc-key=PATH
 
-SSL PEM Private key
+TLS PEM private key file.
 
 ### --rc-max-header-bytes=VALUE
 
-Maximum size of request header (default 4096)
+Maximum size of request header (default 4096).
+
+### --rc-min-tls-version=VALUE
+
+The minimum TLS version that is acceptable. Valid values are "tls1.0",
+"tls1.1", "tls1.2" and "tls1.3" (default "tls1.0").
 
 ### --rc-user=VALUE
 
@@ -51,15 +59,15 @@ Password for authentication.
 
 ### --rc-realm=VALUE
 
-Realm for authentication (default "rclone")
+Realm for authentication (default "rclone").
 
 ### --rc-server-read-timeout=DURATION
 
-Timeout for server reading data (default 1h0m0s)
+Timeout for server reading data (default 1h0m0s).
 
 ### --rc-server-write-timeout=DURATION
 
-Timeout for server writing data (default 1h0m0s)
+Timeout for server writing data (default 1h0m0s).
 
 ### --rc-serve
 
@@ -68,6 +76,12 @@ means objects will be accessible at http://127.0.0.1:5572/ by default,
 so you can browse to http://127.0.0.1:5572/ or http://127.0.0.1:5572/*
 to see a listing of the remotes.  Objects may be requested from
 remotes using this syntax http://127.0.0.1:5572/[remote:path]/path/to/object
+
+Default Off.
+
+### --rc-serve-no-modtime
+
+Set this flag to skip reading the modification time (can speed things up).
 
 Default Off.
 
@@ -88,6 +102,7 @@ Default Off.
 ### --rc-enable-metrics
 
 Enable OpenMetrics/Prometheus compatible endpoint at `/metrics`.
+If more control over the metrics is desired (for example running it on a different port or with different auth) then endpoint can be enabled with the `--metrics-*` flags instead.
 
 Default Off.
 
@@ -150,12 +165,22 @@ use these methods.  The alternative is to use `--rc-user` and
 
 Default Off.
 
+### --rc-baseurl
+
+Prefix for URLs.
+
+Default is root
+
+### --rc-template
+
+User-specified template.
+
 ## Accessing the remote control via the rclone rc command {#api-rc}
 
 Rclone itself implements the remote control protocol in its `rclone
 rc` command.
 
-You can use it like this
+You can use it like this:
 
 ```
 $ rclone rc rc/noop param1=one param2=two
@@ -165,8 +190,23 @@ $ rclone rc rc/noop param1=one param2=two
 }
 ```
 
-Run `rclone rc` on its own to see the help for the installed remote
-control commands.
+If the remote is running on a different URL than the default
+`http://localhost:5572/`, use the `--url` option to specify it:
+
+```
+$ rclone rc --url http://some.remote:1234/ rc/noop
+```
+
+Or, if the remote is listening on a Unix socket, use the `--unix-socket` option
+instead:
+
+```
+$ rclone rc --unix-socket /tmp/rclone.sock rc/noop
+```
+
+Run `rclone rc` on its own, without any commands, to see the help for the
+installed remote control commands. Note that this also needs to connect to the
+remote server.
 
 ## JSON input
 
@@ -288,7 +328,7 @@ parameter, you would pass this parameter in your JSON blob.
 
 If using `rclone rc` this could be passed as
 
-    rclone rc operations/sync ... _config='{"CheckSum": true}'
+    rclone rc sync/sync ... _config='{"CheckSum": true}'
 
 Any config parameters you don't set will inherit the global defaults
 which were set with command line flags or environment variables.
@@ -378,6 +418,76 @@ call and taken by the [options/set](#options-set) calls as well as the
 - `BandwidthSpec` - this will be set and returned as a string, eg
   "1M".
 
+### Option blocks {#option-blocks}
+
+The calls [options/info](#options-info) (for the main config) and
+[config/providers](#config-providers) (for the backend config) may be
+used to get information on the rclone configuration options. This can
+be used to build user interfaces for displaying and setting any rclone
+option.
+
+These consist of arrays of `Option` blocks. These have the following
+format. Each block describes a single option.
+
+| Field | Type | Optional | Description |
+|-------|------|----------|-------------|
+| Name       | string     | N | name of the option in snake_case |
+| FieldName  | string     | N | name of the field used in the rc - if blank use Name |
+| Help       | string     | N | help, started with a single sentence on a single line |
+| Groups     | string     | Y | groups this option belongs to - comma separated string for options classification |
+| Provider   | string     | Y | set to filter on provider |
+| Default    | any        | N | default value, if set (and not to nil or "") then Required does nothing |
+| Value      | any        | N | value to be set by flags |
+| Examples   | Examples   | Y | predefined values that can be selected from list (multiple-choice option) |
+| ShortOpt   | string     | Y | the short command line option for this |
+| Hide       | Visibility | N | if non zero, this option is hidden from the configurator or the command line |
+| Required   | bool       | N | this option is required, meaning value cannot be empty unless there is a default |
+| IsPassword | bool       | N | set if the option is a password |
+| NoPrefix   | bool       | N | set if the option for this should not use the backend prefix |
+| Advanced   | bool       | N | set if this is an advanced config option |
+| Exclusive  | bool       | N | set if the answer can only be one of the examples (empty string allowed unless Required or Default is set) |
+| Sensitive  | bool       | N | set if this option should be redacted when using `rclone config redacted` |
+
+An example of this might be the `--log-level` flag. Note that the
+`Name` of the option becomes the command line flag with `_` replaced
+with `-`.
+
+```
+{
+    "Advanced": false,
+    "Default": 5,
+    "DefaultStr": "NOTICE",
+    "Examples": [
+        {
+            "Help": "",
+            "Value": "EMERGENCY"
+        },
+        {
+            "Help": "",
+            "Value": "ALERT"
+        },
+        ...
+    ],
+    "Exclusive": true,
+    "FieldName": "LogLevel",
+    "Groups": "Logging",
+    "Help": "Log level DEBUG|INFO|NOTICE|ERROR",
+    "Hide": 0,
+    "IsPassword": false,
+    "Name": "log_level",
+    "NoPrefix": true,
+    "Required": true,
+    "Sensitive": false,
+    "Type": "LogLevel",
+    "Value": null,
+    "ValueStr": "NOTICE"
+},
+```
+
+Note that the `Help` may be multiple lines separated by `\n`. The
+first line will always be a short sentence and this is the sentence
+shown when running `rclone help flags`.
+
 ## Specifying remotes to work on
 
 Remotes are specified with the `fs=`, `srcFs=`, `dstFs=`
@@ -387,7 +497,7 @@ The parameters can be a string as per the rest of rclone, eg
 `s3:bucket/path` or `:sftp:/my/dir`. They can also be specified as
 JSON blobs.
 
-If specifyng a JSON blob it should be a object mapping strings to
+If specifying a JSON blob it should be a object mapping strings to
 strings. These values will be used to configure the remote. There are
 3 special values which may be set:
 
@@ -404,7 +514,7 @@ For example this JSON is equivalent to `remote:/tmp`
 ```
 {
     "_name": "remote",
-    "_path": "/tmp"
+    "_root": "/tmp"
 }
 ```
 
@@ -414,7 +524,7 @@ And this is equivalent to `:sftp,host='example.com':/tmp`
 {
     "type": "sftp",
     "host": "example.com",
-    "_path": "/tmp"
+    "_root": "/tmp"
 }
 ```
 
@@ -423,7 +533,7 @@ And this is equivalent to `/tmp/dir`
 ```
 {
     type = "local",
-    _ path = "/tmp/dir"
+    _root = "/tmp/dir"
 }
 ```
 
@@ -535,7 +645,7 @@ This takes the following parameters:
     - result - result to restart with - used with continue
 
 
-See the [config create command](/commands/rclone_config_create/) command for more information on the above.
+See the [config create](/commands/rclone_config_create/) command for more information on the above.
 
 **Authentication is required for this call.**
 
@@ -545,7 +655,7 @@ Parameters:
 
 - name - name of remote to delete
 
-See the [config delete command](/commands/rclone_config_delete/) command for more information on the above.
+See the [config delete](/commands/rclone_config_delete/) command for more information on the above.
 
 **Authentication is required for this call.**
 
@@ -556,7 +666,7 @@ Returns a JSON object:
 
 Where keys are remote names and values are the config parameters.
 
-See the [config dump command](/commands/rclone_config_dump/) command for more information on the above.
+See the [config dump](/commands/rclone_config_dump/) command for more information on the above.
 
 **Authentication is required for this call.**
 
@@ -566,16 +676,16 @@ Parameters:
 
 - name - name of remote to get
 
-See the [config dump command](/commands/rclone_config_dump/) command for more information on the above.
+See the [config dump](/commands/rclone_config_dump/) command for more information on the above.
 
 **Authentication is required for this call.**
 
-### config/listremotes: Lists the remotes in the config file. {#config-listremotes}
+### config/listremotes: Lists the remotes in the config file and defined in environment variables. {#config-listremotes}
 
 Returns
 - remotes - array of remote names
 
-See the [listremotes command](/commands/rclone_listremotes/) command for more information on the above.
+See the [listremotes](/commands/rclone_listremotes/) command for more information on the above.
 
 **Authentication is required for this call.**
 
@@ -587,7 +697,27 @@ This takes the following parameters:
 - parameters - a map of \{ "key": "value" \} pairs
 
 
-See the [config password command](/commands/rclone_config_password/) command for more information on the above.
+See the [config password](/commands/rclone_config_password/) command for more information on the above.
+
+**Authentication is required for this call.**
+
+### config/paths: Reads the config file path and other important paths. {#config-paths}
+
+Returns a JSON object with the following keys:
+
+- config: path to config file
+- cache: path to root of cache directory
+- temp: path to root of temporary directory
+
+Eg
+
+    {
+        "cache": "/home/USER/.cache/rclone",
+        "config": "/home/USER/.rclone.conf",
+        "temp": "/tmp"
+    }
+
+See the [config paths](/commands/rclone_config_paths/) command for more information on the above.
 
 **Authentication is required for this call.**
 
@@ -596,7 +726,20 @@ See the [config password command](/commands/rclone_config_password/) command for
 Returns a JSON object:
 - providers - array of objects
 
-See the [config providers command](/commands/rclone_config_providers/) command for more information on the above.
+See the [config providers](/commands/rclone_config_providers/) command
+for more information on the above.
+
+Note that the Options blocks are in the same format as returned by
+"options/info". They are described in the
+[option blocks](#option-blocks) section.
+
+**Authentication is required for this call.**
+
+### config/setpath: Set the path of the config file {#config-setpath}
+
+Parameters:
+
+- path - path to the config file to use
 
 **Authentication is required for this call.**
 
@@ -616,7 +759,7 @@ This takes the following parameters:
     - result - result to restart with - used with continue
 
 
-See the [config update command](/commands/rclone_config_update/) command for more information on the above.
+See the [config update](/commands/rclone_config_update/) command for more information on the above.
 
 **Authentication is required for this call.**
 
@@ -663,7 +806,7 @@ If the rate parameter is not supplied then the bandwidth is queried
 The format of the parameter is exactly the same as passed to --bwlimit
 except only one bandwidth may be specified.
 
-In either case "rate" is returned as a human readable string, and
+In either case "rate" is returned as a human-readable string, and
 "bytesPerSecond" is returned as a number.
 
 ### core/command: Run a rclone terminal command over rc. {#core-command}
@@ -698,7 +841,7 @@ Returns:
 	"result": "<Raw command line output>"
 }
 
-OR 
+OR
 {
 	"error": true,
 	"result": "<Raw command line output>"
@@ -707,6 +850,28 @@ OR
 ```
 
 **Authentication is required for this call.**
+
+### core/du: Returns disk usage of a locally attached disk. {#core-du}
+
+This returns the disk usage for the local directory passed in as dir.
+
+If the directory is not passed in, it defaults to the directory
+pointed to by --cache-dir.
+
+- dir - string (optional)
+
+Returns:
+
+```
+{
+	"dir": "/",
+	"info": {
+		"Available": 361769115648,
+		"Free": 361785892864,
+		"Total": 982141468672
+	}
+}
+```
 
 ### core/gc: Runs a garbage collection. {#core-gc}
 
@@ -787,6 +952,10 @@ Returns the following values:
 	"lastError": last error string,
 	"renames" : number of files renamed,
 	"retryError": boolean showing whether there has been at least one non-NoRetryError,
+        "serverSideCopies": number of server side copies done,
+        "serverSideCopyBytes": number bytes server side copied,
+        "serverSideMoves": number of server side moves done,
+        "serverSideMoveBytes": number bytes server side moved,
 	"speed": average speed in bytes per second since start of the group,
 	"totalBytes": total number of bytes in the group,
 	"totalChecks": total number of checks in the group,
@@ -893,6 +1062,22 @@ Parameters:
 
 - rate - int
 
+### debug/set-gc-percent: Call runtime/debug.SetGCPercent for setting the garbage collection target percentage. {#debug-set-gc-percent}
+
+SetGCPercent sets the garbage collection target percentage: a collection is triggered
+when the ratio of freshly allocated data to live data remaining after the previous collection
+reaches this percentage. SetGCPercent returns the previous setting. The initial setting is the
+value of the GOGC environment variable at startup, or 100 if the variable is not set.
+
+This setting may be effectively reduced in order to maintain a memory limit.
+A negative percentage effectively disables garbage collection, unless the memory limit is reached.
+
+See https://pkg.go.dev/runtime/debug#SetMemoryLimit for more details.
+
+Parameters:
+
+- gc-percent - int
+
 ### debug/set-mutex-profile-fraction: Set runtime.SetMutexProfileFraction for mutex profiling. {#debug-set-mutex-profile-fraction}
 
 SetMutexProfileFraction controls the fraction of mutex contention
@@ -913,6 +1098,38 @@ Parameters:
 Results:
 
 - previousRate - int
+
+### debug/set-soft-memory-limit: Call runtime/debug.SetMemoryLimit for setting a soft memory limit for the runtime. {#debug-set-soft-memory-limit}
+
+SetMemoryLimit provides the runtime with a soft memory limit.
+
+The runtime undertakes several processes to try to respect this memory limit, including
+adjustments to the frequency of garbage collections and returning memory to the underlying
+system more aggressively. This limit will be respected even if GOGC=off (or, if SetGCPercent(-1) is executed).
+
+The input limit is provided as bytes, and includes all memory mapped, managed, and not
+released by the Go runtime. Notably, it does not account for space used by the Go binary
+and memory external to Go, such as memory managed by the underlying system on behalf of
+the process, or memory managed by non-Go code inside the same process.
+Examples of excluded memory sources include: OS kernel memory held on behalf of the process,
+memory allocated by C code, and memory mapped by syscall.Mmap (because it is not managed by the Go runtime).
+
+A zero limit or a limit that's lower than the amount of memory used by the Go runtime may cause
+the garbage collector to run nearly continuously. However, the application may still make progress.
+
+The memory limit is always respected by the Go runtime, so to effectively disable this behavior,
+set the limit very high. math.MaxInt64 is the canonical value for disabling the limit, but values
+much greater than the available memory on the underlying system work just as well.
+
+See https://go.dev/doc/gc-guide for a detailed guide explaining the soft memory limit in more detail,
+as well as a variety of common use-cases and scenarios.
+
+SetMemoryLimit returns the previously set memory limit. A negative input does not adjust the limit,
+and allows for retrieval of the currently set memory limit.
+
+Parameters:
+
+- mem-limit - int
 
 ### fscache/clear: Clear the Fs cache. {#fscache-clear}
 
@@ -940,7 +1157,8 @@ Parameters: None.
 
 Results:
 
-- jobids - array of integer job ids.
+- executeId - string id of rclone executing (change after restart)
+- jobids - array of integer job ids (starting at 1 on each restart)
 
 ### job/status: Reads the status of the job ID {#job-status}
 
@@ -966,6 +1184,12 @@ Results:
 Parameters:
 
 - jobid - id of the job (integer).
+
+### job/stopgroup: Stop all running jobs in a group {#job-stopgroup}
+
+Parameters:
+
+- group - name of the group (string).
 
 ### mount/listmounts: Show current mount points {#mount-listmounts}
 
@@ -1042,9 +1266,11 @@ Example:
 
 **Authentication is required for this call.**
 
-### mount/unmountall: Show current mount points {#mount-unmountall}
+### mount/unmountall: Unmount all active mounts {#mount-unmountall}
 
-This shows currently mounted points, which can be used for performing an unmount.
+rclone allows Linux, FreeBSD, macOS and Windows to
+mount any of Rclone's cloud storage systems as a file system with
+FUSE.
 
 This takes no parameters and returns error if unmount does not succeed.
 
@@ -1062,7 +1288,57 @@ This takes the following parameters:
 
 The result is as returned from rclone about --json
 
-See the [about command](/commands/rclone_size/) command for more information on the above.
+See the [about](/commands/rclone_about/) command for more information on the above.
+
+**Authentication is required for this call.**
+
+### operations/check: check the source and destination are the same {#operations-check}
+
+Checks the files in the source and destination match.  It compares
+sizes and hashes and logs a report of files that don't
+match.  It doesn't alter the source or destination.
+
+This takes the following parameters:
+
+- srcFs - a remote name string e.g. "drive:" for the source, "/" for local filesystem
+- dstFs - a remote name string e.g. "drive2:" for the destination, "/" for local filesystem
+- download - check by downloading rather than with hash
+- checkFileHash - treat checkFileFs:checkFileRemote as a SUM file with hashes of given type
+- checkFileFs - treat checkFileFs:checkFileRemote as a SUM file with hashes of given type
+- checkFileRemote - treat checkFileFs:checkFileRemote as a SUM file with hashes of given type
+- oneWay -  check one way only, source files must exist on remote
+- combined - make a combined report of changes (default false)
+- missingOnSrc - report all files missing from the source (default true)
+- missingOnDst - report all files missing from the destination (default true)
+- match - report all matching files (default false)
+- differ - report all non-matching files (default true)
+- error - report all files with errors (hashing or reading) (default true)
+
+If you supply the download flag, it will download the data from
+both remotes and check them against each other on the fly.  This can
+be useful for remotes that don't support hashes or if you really want
+to check all the data.
+
+If you supply the size-only global flag, it will only compare the sizes not
+the hashes as well.  Use this for a quick check.
+
+If you supply the checkFileHash option with a valid hash name, the
+checkFileFs:checkFileRemote must point to a text file in the SUM
+format. This treats the checksum file as the source and dstFs as the
+destination. Note that srcFs is not used and should not be supplied in
+this case.
+
+Returns:
+
+- success - true if no error, false otherwise
+- status - textual summary of check, OK or text string
+- hashType - hash used in check, may be missing
+- combined - array of strings of combined report of changes
+- missingOnSrc - array of strings of all files missing from the source
+- missingOnDst - array of strings of all files missing from the destination
+- match - array of strings of all matching files
+- differ - array of strings of all non-matching files
+- error - array of strings of all files with errors (hashing or reading)
 
 **Authentication is required for this call.**
 
@@ -1072,7 +1348,7 @@ This takes the following parameters:
 
 - fs - a remote name string e.g. "drive:"
 
-See the [cleanup command](/commands/rclone_cleanup/) command for more information on the above.
+See the [cleanup](/commands/rclone_cleanup/) command for more information on the above.
 
 **Authentication is required for this call.**
 
@@ -1080,9 +1356,9 @@ See the [cleanup command](/commands/rclone_cleanup/) command for more informatio
 
 This takes the following parameters:
 
-- srcFs - a remote name string e.g. "drive:" for the source
+- srcFs - a remote name string e.g. "drive:" for the source, "/" for local filesystem
 - srcRemote - a path within that remote e.g. "file.txt" for the source
-- dstFs - a remote name string e.g. "drive2:" for the destination
+- dstFs - a remote name string e.g. "drive2:" for the destination, "/" for local filesystem
 - dstRemote - a path within that remote e.g. "file2.txt" for the destination
 
 **Authentication is required for this call.**
@@ -1095,7 +1371,8 @@ This takes the following parameters:
 - remote - a path within that remote e.g. "dir"
 - url - string, URL to read from
  - autoFilename - boolean, set to true to retrieve destination file name from url
-See the [copyurl command](/commands/rclone_copyurl/) command for more information on the above.
+
+See the [copyurl](/commands/rclone_copyurl/) command for more information on the above.
 
 **Authentication is required for this call.**
 
@@ -1105,7 +1382,7 @@ This takes the following parameters:
 
 - fs - a remote name string e.g. "drive:"
 
-See the [delete command](/commands/rclone_delete/) command for more information on the above.
+See the [delete](/commands/rclone_delete/) command for more information on the above.
 
 **Authentication is required for this call.**
 
@@ -1116,7 +1393,7 @@ This takes the following parameters:
 - fs - a remote name string e.g. "drive:"
 - remote - a path within that remote e.g. "dir"
 
-See the [deletefile command](/commands/rclone_deletefile/) command for more information on the above.
+See the [deletefile](/commands/rclone_deletefile/) command for more information on the above.
 
 **Authentication is required for this call.**
 
@@ -1130,52 +1407,153 @@ This returns info about the remote passed in;
 
 ```
 {
-	// optional features and whether they are available or not
-	"Features": {
-		"About": true,
-		"BucketBased": false,
-		"CanHaveEmptyDirectories": true,
-		"CaseInsensitive": false,
-		"ChangeNotify": false,
-		"CleanUp": false,
-		"Copy": false,
-		"DirCacheFlush": false,
-		"DirMove": true,
-		"DuplicateFiles": false,
-		"GetTier": false,
-		"ListR": false,
-		"MergeDirs": false,
-		"Move": true,
-		"OpenWriterAt": true,
-		"PublicLink": false,
-		"Purge": true,
-		"PutStream": true,
-		"PutUnchecked": false,
-		"ReadMimeType": false,
-		"ServerSideAcrossConfigs": false,
-		"SetTier": false,
-		"SetWrapper": false,
-		"UnWrap": false,
-		"WrapFs": false,
-		"WriteMimeType": false
-	},
-	// Names of hashes available
-	"Hashes": [
-		"MD5",
-		"SHA-1",
-		"DropboxHash",
-		"QuickXorHash"
-	],
-	"Name": "local",	// Name as created
-	"Precision": 1,		// Precision of timestamps in ns
-	"Root": "/",		// Path as created
-	"String": "Local file system at /" // how the remote will appear in logs
+        // optional features and whether they are available or not
+        "Features": {
+                "About": true,
+                "BucketBased": false,
+                "BucketBasedRootOK": false,
+                "CanHaveEmptyDirectories": true,
+                "CaseInsensitive": false,
+                "ChangeNotify": false,
+                "CleanUp": false,
+                "Command": true,
+                "Copy": false,
+                "DirCacheFlush": false,
+                "DirMove": true,
+                "Disconnect": false,
+                "DuplicateFiles": false,
+                "GetTier": false,
+                "IsLocal": true,
+                "ListR": false,
+                "MergeDirs": false,
+                "MetadataInfo": true,
+                "Move": true,
+                "OpenWriterAt": true,
+                "PublicLink": false,
+                "Purge": true,
+                "PutStream": true,
+                "PutUnchecked": false,
+                "ReadMetadata": true,
+                "ReadMimeType": false,
+                "ServerSideAcrossConfigs": false,
+                "SetTier": false,
+                "SetWrapper": false,
+                "Shutdown": false,
+                "SlowHash": true,
+                "SlowModTime": false,
+                "UnWrap": false,
+                "UserInfo": false,
+                "UserMetadata": true,
+                "WrapFs": false,
+                "WriteMetadata": true,
+                "WriteMimeType": false
+        },
+        // Names of hashes available
+        "Hashes": [
+                "md5",
+                "sha1",
+                "whirlpool",
+                "crc32",
+                "sha256",
+                "dropbox",
+                "mailru",
+                "quickxor"
+        ],
+        "Name": "local",        // Name as created
+        "Precision": 1,         // Precision of timestamps in ns
+        "Root": "/",            // Path as created
+        "String": "Local file system at /", // how the remote will appear in logs
+        // Information about the system metadata for this backend
+        "MetadataInfo": {
+                "System": {
+                        "atime": {
+                                "Help": "Time of last access",
+                                "Type": "RFC 3339",
+                                "Example": "2006-01-02T15:04:05.999999999Z07:00"
+                        },
+                        "btime": {
+                                "Help": "Time of file birth (creation)",
+                                "Type": "RFC 3339",
+                                "Example": "2006-01-02T15:04:05.999999999Z07:00"
+                        },
+                        "gid": {
+                                "Help": "Group ID of owner",
+                                "Type": "decimal number",
+                                "Example": "500"
+                        },
+                        "mode": {
+                                "Help": "File type and mode",
+                                "Type": "octal, unix style",
+                                "Example": "0100664"
+                        },
+                        "mtime": {
+                                "Help": "Time of last modification",
+                                "Type": "RFC 3339",
+                                "Example": "2006-01-02T15:04:05.999999999Z07:00"
+                        },
+                        "rdev": {
+                                "Help": "Device ID (if special file)",
+                                "Type": "hexadecimal",
+                                "Example": "1abc"
+                        },
+                        "uid": {
+                                "Help": "User ID of owner",
+                                "Type": "decimal number",
+                                "Example": "500"
+                        }
+                },
+                "Help": "Textual help string\n"
+        }
 }
 ```
 
 This command does not have a command line equivalent so use this instead:
 
     rclone rc --loopback operations/fsinfo fs=remote:
+
+### operations/hashsum: Produces a hashsum file for all the objects in the path. {#operations-hashsum}
+
+Produces a hash file for all the objects in the path using the hash
+named.  The output is in the same format as the standard
+md5sum/sha1sum tool.
+
+This takes the following parameters:
+
+- fs - a remote name string e.g. "drive:" for the source, "/" for local filesystem
+    - this can point to a file and just that file will be returned in the listing.
+- hashType - type of hash to be used
+- download - check by downloading rather than with hash (boolean)
+- base64 - output the hashes in base64 rather than hex (boolean)
+
+If you supply the download flag, it will download the data from the
+remote and create the hash on the fly. This can be useful for remotes
+that don't support the given hash or if you really want to check all
+the data.
+
+Note that if you wish to supply a checkfile to check hashes against
+the current files then you should use operations/check instead of
+operations/hashsum.
+
+Returns:
+
+- hashsum - array of strings of the hashes
+- hashType - type of hash used
+
+Example:
+
+    $ rclone rc --loopback operations/hashsum fs=bin hashType=MD5 download=true base64=true
+    {
+        "hashType": "md5",
+        "hashsum": [
+            "WTSVLpuiXyJO_kGzJerRLg==  backend-versions.sh",
+            "v1b_OlWCJO9LtNq3EIKkNQ==  bisect-go-rclone.sh",
+            "VHbmHzHh4taXzgag8BAIKQ==  bisect-rclone.sh",
+        ]
+    }
+
+See the [hashsum](/commands/rclone_hashsum/) command for more information on the above.
+
+**Authentication is required for this call.**
 
 ### operations/list: List the given remote and path in JSON format {#operations-list}
 
@@ -1192,6 +1570,7 @@ This takes the following parameters:
     - noMimeType - If set don't show mime types
     - dirsOnly - If set only show directories
     - filesOnly - If set only show files
+    - metadata - If set return metadata of objects also
     - hashTypes - array of strings of hash types to show if showHash set
 
 Returns:
@@ -1199,7 +1578,7 @@ Returns:
 - list
     - This is an array of objects as described in the lsjson command
 
-See the [lsjson command](/commands/rclone_lsjson/) for more information on the above and examples.
+See the [lsjson](/commands/rclone_lsjson/) command for more information on the above and examples.
 
 **Authentication is required for this call.**
 
@@ -1210,7 +1589,7 @@ This takes the following parameters:
 - fs - a remote name string e.g. "drive:"
 - remote - a path within that remote e.g. "dir"
 
-See the [mkdir command](/commands/rclone_mkdir/) command for more information on the above.
+See the [mkdir](/commands/rclone_mkdir/) command for more information on the above.
 
 **Authentication is required for this call.**
 
@@ -1218,9 +1597,9 @@ See the [mkdir command](/commands/rclone_mkdir/) command for more information on
 
 This takes the following parameters:
 
-- srcFs - a remote name string e.g. "drive:" for the source
+- srcFs - a remote name string e.g. "drive:" for the source, "/" for local filesystem
 - srcRemote - a path within that remote e.g. "file.txt" for the source
-- dstFs - a remote name string e.g. "drive2:" for the destination
+- dstFs - a remote name string e.g. "drive2:" for the destination, "/" for local filesystem
 - dstRemote - a path within that remote e.g. "file2.txt" for the destination
 
 **Authentication is required for this call.**
@@ -1238,7 +1617,7 @@ Returns:
 
 - url - URL of the resource
 
-See the [link command](/commands/rclone_link/) command for more information on the above.
+See the [link](/commands/rclone_link/) command for more information on the above.
 
 **Authentication is required for this call.**
 
@@ -1249,7 +1628,7 @@ This takes the following parameters:
 - fs - a remote name string e.g. "drive:"
 - remote - a path within that remote e.g. "dir"
 
-See the [purge command](/commands/rclone_purge/) command for more information on the above.
+See the [purge](/commands/rclone_purge/) command for more information on the above.
 
 **Authentication is required for this call.**
 
@@ -1260,7 +1639,7 @@ This takes the following parameters:
 - fs - a remote name string e.g. "drive:"
 - remote - a path within that remote e.g. "dir"
 
-See the [rmdir command](/commands/rclone_rmdir/) command for more information on the above.
+See the [rmdir](/commands/rclone_rmdir/) command for more information on the above.
 
 **Authentication is required for this call.**
 
@@ -1271,7 +1650,29 @@ This takes the following parameters:
 - fs - a remote name string e.g. "drive:"
 - remote - a path within that remote e.g. "dir"
 - leaveRoot - boolean, set to true not to delete the root
-See the [rmdirs command](/commands/rclone_rmdirs/) command for more information on the above.
+
+See the [rmdirs](/commands/rclone_rmdirs/) command for more information on the above.
+
+**Authentication is required for this call.**
+
+### operations/settier: Changes storage tier or class on all files in the path {#operations-settier}
+
+This takes the following parameters:
+
+- fs - a remote name string e.g. "drive:"
+
+See the [settier](/commands/rclone_settier/) command for more information on the above.
+
+**Authentication is required for this call.**
+
+### operations/settierfile: Changes storage tier or class on the single file pointed to {#operations-settierfile}
+
+This takes the following parameters:
+
+- fs - a remote name string e.g. "drive:"
+- remote - a path within that remote e.g. "dir"
+
+See the [settierfile](/commands/rclone_settierfile/) command for more information on the above.
 
 **Authentication is required for this call.**
 
@@ -1286,7 +1687,7 @@ Returns:
 - count - number of files
 - bytes - number of bytes in those files
 
-See the [size command](/commands/rclone_size/) command for more information on the above.
+See the [size](/commands/rclone_size/) command for more information on the above.
 
 **Authentication is required for this call.**
 
@@ -1306,7 +1707,7 @@ The result is
 Note that if you are only interested in files then it is much more
 efficient to set the filesOnly flag in the options.
 
-See the [lsjson command](/commands/rclone_lsjson/) for more information on the above and examples.
+See the [lsjson](/commands/rclone_lsjson/) command for more information on the above and examples.
 
 **Authentication is required for this call.**
 
@@ -1317,7 +1718,8 @@ This takes the following parameters:
 - fs - a remote name string e.g. "drive:"
 - remote - a path within that remote e.g. "dir"
 - each part in body represents a file to be uploaded
-See the [uploadfile command](/commands/rclone_uploadfile/) command for more information on the above.
+
+See the [uploadfile](/commands/rclone_uploadfile/) command for more information on the above.
 
 **Authentication is required for this call.**
 
@@ -1331,12 +1733,30 @@ Returns:
 Returns an object where keys are option block names and values are an
 object with the current option values in.
 
+Parameters:
+
+- blocks: optional string of comma separated blocks to include
+    - all are included if this is missing or ""
+
 Note that these are the global options which are unaffected by use of
 the _config and _filter parameters. If you wish to read the parameters
 set in _config then use options/config and for _filter use options/filter.
 
 This shows the internal names of the option within rclone which should
 map to the external options very easily with a few exceptions.
+
+### options/info: Get info about all the global options {#options-info}
+
+Returns an object where keys are option block names and values are an
+array of objects with info about each options.
+
+Parameters:
+
+- blocks: optional string of comma separated blocks to include
+    - all are included if this is missing or ""
+
+These objects are in the same format as returned by "config/providers". They are
+described in the [option blocks](#option-blocks) section.
 
 ### options/local: Get the currently active config for this call {#options-local}
 
@@ -1497,6 +1917,39 @@ check that parameter passing is working properly.
 
 **Authentication is required for this call.**
 
+### sync/bisync: Perform bidirectional synchronization between two paths. {#sync-bisync}
+
+This takes the following parameters
+
+- path1 - a remote directory string e.g. `drive:path1`
+- path2 - a remote directory string e.g. `drive:path2`
+- dryRun - dry-run mode
+- resync - performs the resync run
+- checkAccess - abort if RCLONE_TEST files are not found on both filesystems
+- checkFilename - file name for checkAccess (default: RCLONE_TEST)
+- maxDelete - abort sync if percentage of deleted files is above
+  this threshold (default: 50)
+- force - Bypass maxDelete safety check and run the sync
+- checkSync - `true` by default, `false` disables comparison of final listings,
+              `only` will skip sync, only compare listings from the last run
+- createEmptySrcDirs - Sync creation and deletion of empty directories. 
+			  (Not compatible with --remove-empty-dirs)
+- removeEmptyDirs - remove empty directories at the final cleanup step
+- filtersFile - read filtering patterns from a file
+- ignoreListingChecksum - Do not use checksums for listings
+- resilient - Allow future runs to retry after certain less-serious errors, instead of requiring resync. 
+            Use at your own risk!
+- workdir - server directory for history files (default: `~/.cache/rclone/bisync`)
+- backupdir1 - --backup-dir for Path1. Must be a non-overlapping path on the same remote.
+- backupdir2 - --backup-dir for Path2. Must be a non-overlapping path on the same remote.
+- noCleanup - retain working files
+
+See [bisync command help](https://rclone.org/commands/rclone_bisync/)
+and [full bisync description](https://rclone.org/bisync/)
+for more information.
+
+**Authentication is required for this call.**
+
 ### sync/copy: copy a directory from source remote to destination remote {#sync-copy}
 
 This takes the following parameters:
@@ -1506,7 +1959,7 @@ This takes the following parameters:
 - createEmptySrcDirs - create empty src directories on destination if set
 
 
-See the [copy command](/commands/rclone_copy/) command for more information on the above.
+See the [copy](/commands/rclone_copy/) command for more information on the above.
 
 **Authentication is required for this call.**
 
@@ -1520,7 +1973,7 @@ This takes the following parameters:
 - deleteEmptySrcDirs - delete empty src directories if set
 
 
-See the [move command](/commands/rclone_move/) command for more information on the above.
+See the [move](/commands/rclone_move/) command for more information on the above.
 
 **Authentication is required for this call.**
 
@@ -1533,7 +1986,7 @@ This takes the following parameters:
 - createEmptySrcDirs - create empty src directories on destination if set
 
 
-See the [sync command](/commands/rclone_sync/) command for more information on the above.
+See the [sync](/commands/rclone_sync/) command for more information on the above.
 
 **Authentication is required for this call.**
 
@@ -1593,6 +2046,74 @@ supplied and if there is only one VFS in use then that VFS will be
 used. If there is more than one VFS in use then the "fs" parameter
 must be supplied.
 
+### vfs/queue: Queue info for a VFS. {#vfs-queue}
+
+This returns info about the upload queue for the selected VFS.
+
+This is only useful if `--vfs-cache-mode` > off. If you call it when
+the `--vfs-cache-mode` is off, it will return an empty result.
+
+    {
+        "queued": // an array of files queued for upload
+        [
+            {
+                "name":      "file",   // string: name (full path) of the file,
+                "id":        123,      // integer: id of this item in the queue,
+                "size":      79,       // integer: size of the file in bytes
+                "expiry":    1.5       // float: time until file is eligible for transfer, lowest goes first
+                "tries":     1,        // integer: number of times we have tried to upload
+                "delay":     5.0,      // float: seconds between upload attempts
+                "uploading": false,    // boolean: true if item is being uploaded
+            },
+       ],
+    }
+
+The `expiry` time is the time until the file is eligible for being
+uploaded in floating point seconds. This may go negative. As rclone
+only transfers `--transfers` files at once, only the lowest
+`--transfers` expiry times will have `uploading` as `true`. So there
+may be files with negative expiry times for which `uploading` is
+`false`.
+
+ 
+This command takes an "fs" parameter. If this parameter is not
+supplied and if there is only one VFS in use then that VFS will be
+used. If there is more than one VFS in use then the "fs" parameter
+must be supplied.
+
+### vfs/queue-set-expiry: Set the expiry time for an item queued for upload. {#vfs-queue-set-expiry}
+
+Use this to adjust the `expiry` time for an item in the upload queue.
+You will need to read the `id` of the item using `vfs/queue` before
+using this call.
+
+You can then set `expiry` to a floating point number of seconds from
+now when the item is eligible for upload. If you want the item to be
+uploaded as soon as possible then set it to a large negative number (eg
+-1000000000). If you want the upload of the item to be delayed
+for a long time then set it to a large positive number.
+
+Setting the `expiry` of an item which has already has started uploading
+will have no effect - the item will carry on being uploaded.
+
+This will return an error if called with `--vfs-cache-mode` off or if
+the `id` passed is not found.
+
+This takes the following parameters
+
+- `fs` - select the VFS in use (optional)
+- `id` - a numeric ID as returned from `vfs/queue`
+- `expiry` - a new expiry time as floating point seconds
+- `relative` - if set, expiry is to be treated as relative to the current expiry (optional, boolean)
+
+This returns an empty result on success, or an error.
+
+ 
+This command takes an "fs" parameter. If this parameter is not
+supplied and if there is only one VFS in use then that VFS will be
+used. If there is more than one VFS in use then the "fs" parameter
+must be supplied.
+
 ### vfs/refresh: Refresh the directory cache. {#vfs-refresh}
 
 This reads the directories for the specified paths and freshens the
@@ -1609,6 +2130,44 @@ starting with dir will refresh that directory, e.g.
 
 If the parameter recursive=true is given the whole directory tree
 will get refreshed. This refresh will use --fast-list if enabled.
+ 
+This command takes an "fs" parameter. If this parameter is not
+supplied and if there is only one VFS in use then that VFS will be
+used. If there is more than one VFS in use then the "fs" parameter
+must be supplied.
+
+### vfs/stats: Stats for a VFS. {#vfs-stats}
+
+This returns stats for the selected VFS.
+
+    {
+        // Status of the disk cache - only present if --vfs-cache-mode > off
+        "diskCache": {
+            "bytesUsed": 0,
+            "erroredFiles": 0,
+            "files": 0,
+            "hashType": 1,
+            "outOfSpace": false,
+            "path": "/home/user/.cache/rclone/vfs/local/mnt/a",
+            "pathMeta": "/home/user/.cache/rclone/vfsMeta/local/mnt/a",
+            "uploadsInProgress": 0,
+            "uploadsQueued": 0
+        },
+        "fs": "/mnt/a",
+        "inUse": 1,
+        // Status of the in memory metadata cache
+        "metadataCache": {
+            "dirs": 1,
+            "files": 0
+        },
+        // Options as returned by options/get
+        "opt": {
+            "CacheMaxAge": 3600000000000,
+            // ...
+            "WriteWait": 1000000000
+        }
+    }
+
  
 This command takes an "fs" parameter. If this parameter is not
 supplied and if there is only one VFS in use then that VFS will be

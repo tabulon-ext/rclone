@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"io/ioutil"
 	"testing"
 	"time"
 
@@ -35,6 +34,7 @@ func TestStaticObject(t *testing.T) {
 	o = object.NewStaticObjectInfo(remote, now, size, true, nil, nil)
 	_, err = o.Hash(context.Background(), hash.MD5)
 	assert.Equal(t, hash.ErrUnsupported, err)
+	assert.Equal(t, object.MemoryFs, o.Fs())
 
 	hs := map[hash.Type]string{
 		hash.MD5: "potato",
@@ -110,7 +110,7 @@ func TestMemoryObject(t *testing.T) {
 	assert.Equal(t, newNow, o.ModTime(context.Background()))
 
 	checkOpen := func(rc io.ReadCloser, expected string) {
-		actual, err := ioutil.ReadAll(rc)
+		actual, err := io.ReadAll(rc)
 		assert.NoError(t, err)
 		err = rc.Close()
 		assert.NoError(t, err)
@@ -142,7 +142,7 @@ func TestMemoryObject(t *testing.T) {
 	assert.NoError(t, err)
 	checkContent(o, "Rutabaga")
 	assert.Equal(t, newNow, o.ModTime(context.Background()))
-	assert.Equal(t, "Rutaba", string(content)) // check we re-used the buffer
+	assert.Equal(t, "Rutaba", string(content)) // check we reused the buffer
 
 	// not within the buffer
 	newStr := "0123456789"
@@ -153,7 +153,7 @@ func TestMemoryObject(t *testing.T) {
 	err = o.Update(context.Background(), newContent, src)
 	assert.NoError(t, err)
 	checkContent(o, newStr)
-	assert.Equal(t, "Rutaba", string(content)) // check we didn't re-use the buffer
+	assert.Equal(t, "Rutaba", string(content)) // check we didn't reuse the buffer
 
 	// now try streaming
 	newStr = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"

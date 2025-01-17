@@ -1,6 +1,7 @@
 ---
 title: "Docker Volume Plugin"
 description: "Docker Volume Plugin"
+versionIntroduced: "v1.56"
 ---
 
 # Docker Volume Plugin
@@ -164,8 +165,8 @@ Volumes can be created with [docker volume create](https://docs.docker.com/engin
 Here are a few examples:
 ```
 docker volume create vol1 -d rclone -o remote=storj: -o vfs-cache-mode=full
-docker volume create vol2 -d rclone -o remote=:tardigrade,access_grant=xxx:heimdall
-docker volume create vol3 -d rclone -o type=tardigrade -o path=heimdall -o tardigrade-access-grant=xxx -o poll-interval=0
+docker volume create vol2 -d rclone -o remote=:storj,access_grant=xxx:heimdall
+docker volume create vol3 -d rclone -o type=storj -o path=heimdall -o storj-access-grant=xxx -o poll-interval=0
 ```
 
 Note the `-d rclone` flag that tells docker to request volume from the
@@ -208,7 +209,7 @@ but is arguably easier to parameterize in scripts.
 The `path` part is optional.
 
 [Mount and VFS options](/commands/rclone_serve_docker/#options)
-as well as [backend parameters](/flags/#backend-flags) are named
+as well as [backend parameters](/flags/#backend) are named
 like their twin command-line flags without the `--` CLI prefix.
 Optionally you can use underscores instead of dashes in option names.
 For example, `--vfs-cache-mode full` becomes
@@ -535,6 +536,13 @@ PLUGID=123abc...
 sudo curl -H Content-Type:application/json -XPOST -d {} --unix-socket /run/docker/plugins/$PLUGID/rclone.sock http://localhost/Plugin.Activate
 ```
 though this is rarely needed.
+
+If the plugin fails to work properly, and only as a last resort after you tried diagnosing with the above methods, you can try clearing the state of the plugin. **Note that all existing rclone docker volumes will probably have to be recreated.** This might be needed because a reinstall don't cleanup existing state files to allow for easy restoration, as stated above.
+```
+docker plugin disable rclone # disable the plugin to ensure no interference
+sudo rm /var/lib/docker-plugins/rclone/cache/docker-plugin.state # removing the plugin state
+docker plugin enable rclone # re-enable the plugin afterward
+```
 
 ## Caveats
 

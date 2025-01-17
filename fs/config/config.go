@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	mathrand "math/rand"
 	"os"
 	"path/filepath"
@@ -47,6 +46,9 @@ const (
 	// ConfigTokenURL is the config key used to store the token server endpoint
 	ConfigTokenURL = "token_url"
 
+	// ConfigClientCredentials - use OAUTH2 client credentials
+	ConfigClientCredentials = "client_credentials"
+
 	// ConfigEncoding is the config key to change the encoding for a backend
 	ConfigEncoding = "encoding"
 
@@ -58,6 +60,12 @@ const (
 
 	// ConfigAuthNoBrowser indicates that we do not want to open browser
 	ConfigAuthNoBrowser = "config_auth_no_browser"
+
+	// ConfigTemplate is the template content to be used in the authorization webserver
+	ConfigTemplate = "config_template"
+
+	// ConfigTemplateFile is the path to a template file to read into the value of `ConfigTemplate` above
+	ConfigTemplateFile = "config_template_file"
 )
 
 // Storage defines an interface for loading and saving config to
@@ -115,8 +123,11 @@ var (
 
 func init() {
 	// Set the function pointers up in fs
-	fs.ConfigFileGet = FileGetFlag
+	fs.ConfigFileGet = FileGetValue
 	fs.ConfigFileSet = SetValueAndSave
+	fs.ConfigFileHasSection = func(section string) bool {
+		return LoadedData().HasSection(section)
+	}
 	configPath = makeConfigPath()
 	cacheDir = makeCacheDir() // Has fallback to tempDir, so set that first
 	data = newDefaultStorage()
@@ -239,7 +250,7 @@ func makeConfigPath() string {
 	}
 
 	// No existing config file found, prepare proper default for a new one.
-	// But first check if if user supplied a --config variable or environment
+	// But first check if user supplied a --config variable or environment
 	// variable, since then we skip actually trying to create the default
 	// and report any errors related to it (we can't use pflag for this because
 	// it isn't initialised yet so we search the command line manually).
@@ -342,6 +353,9 @@ func Data() Storage {
 	return data
 }
 
+// ErrorConfigFileNotFound is returned when the config file is not found
+var ErrorConfigFileNotFound = errors.New("config file not found")
+
 // LoadedData ensures the config file storage is loaded and returns it
 func LoadedData() Storage {
 	if !dataLoaded {
@@ -360,14 +374,11 @@ func LoadedData() Storage {
 			}
 			dataLoaded = true
 		} else {
-			log.Fatalf("Failed to load config file %q: %v", configPath, err)
+			fs.Fatalf(nil, "Failed to load config file %q: %v", configPath, err)
 		}
 	}
 	return data
 }
-
-// ErrorConfigFileNotFound is returned when the config file is not found
-var ErrorConfigFileNotFound = errors.New("config file not found")
 
 // SaveConfig calling function which saves configuration file.
 // if SaveConfig returns error trying again after sleep.
@@ -385,25 +396,116 @@ func SaveConfig() {
 	fs.Errorf(nil, "Failed to save config after %d tries: %v", ci.LowLevelRetries, err)
 }
 
+// FileSections returns the sections in the config file
+func FileSections() []string {
+	return LoadedData().GetSectionList()
+}
+
+// FileGetValue gets the config key under section returning the
+// the value and true if found and or ("", false) otherwise
+func FileGetValue(section, key string) (string, bool) {
+	return LoadedData().GetValue(section, key)
+}
+
+// FileSetValue sets the key in section to value.
+// It doesn't save the config file.
+func FileSetValue(section, key, value string) {
+	LoadedData().SetValue(section, key, value)
+}
+
+// FileDeleteKey deletes the config key in the config file.
+// It returns true if the key was deleted,
+// or returns false if the section or key didn't exist.
+func FileDeleteKey(section, key string) bool {
+	return LoadedData().DeleteKey(section, key)
+}
+
+// GetValue gets the value for a config key from environment
+// or config file under section returning the default if not set.
+//
+// Emulates the preference documented and normally used by rclone via
+// configmap, which means environment variables before config file.
+func GetValue(remote, key string) string {
+	envKey := fs.ConfigToEnv(remote, key)
+	value, found := os.LookupEnv(envKey)
+	if found {
+		return value
+	}
+	value, _ = LoadedData().GetValue(remote, key)
+	return value
+}
+
 // SetValueAndSave sets the key to the value and saves just that
 // value in the config file.  It loads the old config file in from
 // disk first and overwrites the given value only.
-func SetValueAndSave(name, key, value string) error {
+func SetValueAndSave(remote, key, value string) error {
 	// Set the value in config in case we fail to reload it
-	LoadedData().SetValue(name, key, value)
+	FileSetValue(remote, key, value)
 	// Save it again
 	SaveConfig()
 	return nil
 }
 
-// getWithDefault gets key out of section name returning defaultValue if not
-// found.
-func getWithDefault(name, key, defaultValue string) string {
-	value, found := LoadedData().GetValue(name, key)
-	if !found {
-		return defaultValue
+// Remote defines a remote with a name, type, source and description
+type Remote struct {
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Source      string `json:"source"`
+	Description string `json:"description"`
+}
+
+var remoteEnvRe = regexp.MustCompile(`^RCLONE_CONFIG_(.+?)_TYPE=(.+)$`)
+
+// GetRemotes returns the list of remotes defined in environment and config file.
+//
+// Emulates the preference documented and normally used by rclone via
+// configmap, which means environment variables before config file.
+func GetRemotes() []Remote {
+	var remotes []Remote
+	for _, item := range os.Environ() {
+		matches := remoteEnvRe.FindStringSubmatch(item)
+		if len(matches) == 3 {
+			remotes = append(remotes, Remote{
+				Name:   strings.ToLower(matches[1]),
+				Type:   strings.ToLower(matches[2]),
+				Source: "environment",
+			})
+		}
 	}
-	return value
+	remoteExists := func(name string) bool {
+		for _, remote := range remotes {
+			if name == remote.Name {
+				return true
+			}
+		}
+		return false
+	}
+	sections := LoadedData().GetSectionList()
+	for _, section := range sections {
+		if !remoteExists(section) {
+			typeValue, found := LoadedData().GetValue(section, "type")
+			if found {
+				description, _ := LoadedData().GetValue(section, "description")
+				remotes = append(remotes, Remote{
+					Name:        section,
+					Type:        typeValue,
+					Source:      "file",
+					Description: description,
+				})
+			}
+		}
+	}
+	return remotes
+}
+
+// GetRemoteNames returns the names of remotes defined in environment and config file.
+func GetRemoteNames() []string {
+	remotes := GetRemotes()
+	var remoteNames []string
+	for _, remote := range remotes {
+		remoteNames = append(remoteNames, remote.Name)
+	}
+	return remoteNames
 }
 
 // UpdateRemoteOpt configures the remote update
@@ -440,7 +542,7 @@ func updateRemote(ctx context.Context, name string, keyValues rc.Params, opt Upd
 		ctx = suppressConfirm(ctx)
 	}
 
-	fsType := FileGet(name, "type")
+	fsType := GetValue(name, "type")
 	if fsType == "" {
 		return nil, errors.New("couldn't find type field in config")
 	}
@@ -461,11 +563,14 @@ func updateRemote(ctx context.Context, name string, keyValues rc.Params, opt Upd
 	}
 
 	choices := configmap.Simple{}
-	m := fs.ConfigMap(ri, name, nil)
+	m := fs.ConfigMap(ri.Prefix, ri.Options, name, nil)
 
 	// Set the config
 	for k, v := range keyValues {
 		vStr := fmt.Sprint(v)
+		if strings.ContainsAny(k, "\n\r") || strings.ContainsAny(vStr, "\n\r") {
+			return nil, fmt.Errorf("update remote: invalid key or value contains \\n or \\r")
+		}
 		// Obscure parameter if necessary
 		if _, ok := needsObscure[k]; ok {
 			_, err := obscure.Reveal(vStr)
@@ -474,7 +579,7 @@ func updateRemote(ctx context.Context, name string, keyValues rc.Params, opt Upd
 				// or we are forced to obscure
 				vStr, err = obscure.Obscure(vStr)
 				if err != nil {
-					return nil, fmt.Errorf("UpdateRemote: obscure failed: %w", err)
+					return nil, fmt.Errorf("update remote: obscure failed: %w", err)
 				}
 			}
 		}
@@ -576,6 +681,9 @@ func fsOption() *fs.Option {
 		Required: true,
 	}
 	for _, item := range fs.Registry {
+		if item.Hide {
+			continue
+		}
 		example := fs.OptionExample{
 			Value: item.Name,
 			Help:  item.Description,
@@ -586,62 +694,11 @@ func fsOption() *fs.Option {
 	return o
 }
 
-// FileGetFlag gets the config key under section returning the
-// the value and true if found and or ("", false) otherwise
-func FileGetFlag(section, key string) (string, bool) {
-	return LoadedData().GetValue(section, key)
-}
-
-// FileGet gets the config key under section returning the default if not set.
-//
-// It looks up defaults in the environment if they are present
-func FileGet(section, key string) string {
-	var defaultVal string
-	envKey := fs.ConfigToEnv(section, key)
-	newValue, found := os.LookupEnv(envKey)
-	if found {
-		defaultVal = newValue
-	}
-	return getWithDefault(section, key, defaultVal)
-}
-
-// FileSet sets the key in section to value.  It doesn't save
-// the config file.
-func FileSet(section, key, value string) {
-	if value != "" {
-		LoadedData().SetValue(section, key, value)
-	} else {
-		FileDeleteKey(section, key)
-	}
-}
-
-// FileDeleteKey deletes the config key in the config file.
-// It returns true if the key was deleted,
-// or returns false if the section or key didn't exist.
-func FileDeleteKey(section, key string) bool {
-	return LoadedData().DeleteKey(section, key)
-}
-
-var matchEnv = regexp.MustCompile(`^RCLONE_CONFIG_(.*?)_TYPE=.*$`)
-
-// FileSections returns the sections in the config file
-// including any defined by environment variables.
-func FileSections() []string {
-	sections := LoadedData().GetSectionList()
-	for _, item := range os.Environ() {
-		matches := matchEnv.FindStringSubmatch(item)
-		if len(matches) == 2 {
-			sections = append(sections, strings.ToLower(matches[1]))
-		}
-	}
-	return sections
-}
-
 // DumpRcRemote dumps the config for a single remote
 func DumpRcRemote(name string) (dump rc.Params) {
 	params := rc.Params{}
 	for _, key := range LoadedData().GetKeyList(name) {
-		params[key] = FileGet(name, key)
+		params[key] = GetValue(name, key)
 	}
 	return params
 }
@@ -671,41 +728,11 @@ func Dump() error {
 }
 
 // makeCacheDir returns a directory to use for caching.
-//
-// Code borrowed from go stdlib until it is made public
 func makeCacheDir() (dir string) {
-	// Compute default location.
-	switch runtime.GOOS {
-	case "windows":
-		dir = os.Getenv("LocalAppData")
-
-	case "darwin":
-		dir = os.Getenv("HOME")
-		if dir != "" {
-			dir += "/Library/Caches"
-		}
-
-	case "plan9":
-		dir = os.Getenv("home")
-		if dir != "" {
-			// Plan 9 has no established per-user cache directory,
-			// but $home/lib/xyz is the usual equivalent of $HOME/.xyz on Unix.
-			dir += "/lib/cache"
-		}
-
-	default: // Unix
-		// https://standards.freedesktop.org/basedir-spec/basedir-spec-latest.html
-		dir = os.Getenv("XDG_CACHE_HOME")
-		if dir == "" {
-			dir = os.Getenv("HOME")
-			if dir != "" {
-				dir += "/.cache"
-			}
-		}
-	}
-
-	// if no dir found then use TempDir - we will have a cachedir!
-	if dir == "" {
+	dir, err := os.UserCacheDir()
+	if err != nil || dir == "" {
+		fs.Debugf(nil, "Failed to find user cache dir, using temporary directory: %v", err)
+		// if no dir found then use TempDir - we will have a cachedir!
 		dir = os.TempDir()
 	}
 	return filepath.Join(dir, "rclone")

@@ -20,7 +20,7 @@ const (
 	// interval between progress prints
 	defaultProgressInterval = 500 * time.Millisecond
 	// time format for logging
-	logTimeFormat = "2006-01-02 15:04:05"
+	logTimeFormat = "2006/01/02 15:04:05"
 )
 
 // startProgress starts the progress bar printing
@@ -28,12 +28,12 @@ const (
 // It returns a func which should be called to stop the stats.
 func startProgress() func() {
 	stopStats := make(chan struct{})
-	oldLogPrint := fs.LogPrint
+	oldLogOutput := fs.LogOutput
 	oldSyncPrint := operations.SyncPrintf
 
 	if !log.Redirected() {
 		// Intercept the log calls if not logging to file or syslog
-		fs.LogPrint = func(level fs.LogLevel, text string) {
+		fs.LogOutput = func(level fs.LogLevel, text string) {
 			printProgress(fmt.Sprintf("%s %-6s: %s", time.Now().Format(logTimeFormat), level, text))
 
 		}
@@ -60,7 +60,7 @@ func startProgress() func() {
 			case <-stopStats:
 				ticker.Stop()
 				printProgress("")
-				fs.LogPrint = oldLogPrint
+				fs.LogOutput = oldLogOutput
 				operations.SyncPrintf = oldSyncPrint
 				fmt.Println("")
 				return
@@ -75,14 +75,13 @@ func startProgress() func() {
 
 // state for the progress printing
 var (
-	nlines     = 0 // number of lines in the previous stats block
-	progressMu sync.Mutex
+	nlines = 0 // number of lines in the previous stats block
 )
 
 // printProgress prints the progress with an optional log
 func printProgress(logMessage string) {
-	progressMu.Lock()
-	defer progressMu.Unlock()
+	operations.StdoutMutex.Lock()
+	defer operations.StdoutMutex.Unlock()
 
 	var buf bytes.Buffer
 	w, _ := terminal.GetSize()

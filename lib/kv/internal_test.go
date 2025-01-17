@@ -1,5 +1,4 @@
 //go:build !plan9 && !js
-// +build !plan9,!js
 
 package kv
 
@@ -17,7 +16,6 @@ func TestKvConcurrency(t *testing.T) {
 	require.Equal(t, 0, len(dbMap), "no databases can be started initially")
 
 	const threadNum = 5
-	const facility = "test"
 	var wg sync.WaitGroup
 	ctx := context.Background()
 	results := make([]*DB, threadNum)
@@ -55,7 +53,6 @@ func TestKvConcurrency(t *testing.T) {
 func TestKvExit(t *testing.T) {
 	require.Equal(t, 0, len(dbMap), "no databases can be started initially")
 	const dbNum = 5
-	const openNum = 2
 	ctx := context.Background()
 	for i := 0; i < dbNum; i++ {
 		facility := fmt.Sprintf("test-%d", i)

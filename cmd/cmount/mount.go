@@ -1,12 +1,8 @@
+//go:build cmount && ((linux && cgo) || (darwin && cgo) || (freebsd && cgo) || windows)
+
 // Package cmount implements a FUSE mounting system for rclone remotes.
 //
 // This uses the cgo based cgofuse library
-
-//go:build cmount && cgo && (linux || darwin || freebsd || windows)
-// +build cmount
-// +build cgo
-// +build linux darwin freebsd windows
-
 package cmount
 
 import (
@@ -14,21 +10,19 @@ import (
 	"fmt"
 	"os"
 	"runtime"
-	"strings"
-	"sync/atomic"
 	"time"
 
-	"github.com/billziss-gh/cgofuse/fuse"
 	"github.com/rclone/rclone/cmd/mountlib"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/lib/atexit"
 	"github.com/rclone/rclone/lib/buildinfo"
 	"github.com/rclone/rclone/vfs"
+	"github.com/winfsp/cgofuse/fuse"
 )
 
 func init() {
 	name := "cmount"
-	cmountOnly := ProvidedBy(runtime.GOOS)
+	cmountOnly := runtime.GOOS != "linux" // rclone mount only works for linux
 	if cmountOnly {
 		name = "mount"
 	}
@@ -40,24 +34,11 @@ func init() {
 	buildinfo.Tags = append(buildinfo.Tags, "cmount")
 }
 
-// Find the option string in the current options
-func findOption(name string, options []string) (found bool) {
-	for _, option := range options {
-		if option == "-o" {
-			continue
-		}
-		if strings.Contains(option, name) {
-			return true
-		}
-	}
-	return false
-}
-
 // mountOptions configures the options from the command line flags
 func mountOptions(VFS *vfs.VFS, device string, mountpoint string, opt *mountlib.Options) (options []string) {
 	// Options
 	options = []string{
-		"-o", fmt.Sprintf("attr_timeout=%g", opt.AttrTimeout.Seconds()),
+		"-o", fmt.Sprintf("attr_timeout=%g", time.Duration(opt.AttrTimeout).Seconds()),
 	}
 	if opt.DebugFUSE {
 		options = append(options, "-o", "debug")
@@ -84,10 +65,7 @@ func mountOptions(VFS *vfs.VFS, device string, mountpoint string, opt *mountlib.
 		// WinFSP so cmount must work with or without it.
 		options = append(options, "-o", "atomic_o_trunc")
 		if opt.DaemonTimeout != 0 {
-			options = append(options, "-o", fmt.Sprintf("daemon_timeout=%d", int(opt.DaemonTimeout.Seconds())))
-		}
-		if opt.AllowNonEmpty {
-			options = append(options, "-o", "nonempty")
+			options = append(options, "-o", fmt.Sprintf("daemon_timeout=%d", int(time.Duration(opt.DaemonTimeout).Seconds())))
 		}
 		if opt.AllowOther {
 			options = append(options, "-o", "allow_other")
@@ -101,9 +79,9 @@ func mountOptions(VFS *vfs.VFS, device string, mountpoint string, opt *mountlib.
 		if VFS.Opt.ReadOnly {
 			options = append(options, "-o", "ro")
 		}
-		if opt.WritebackCache {
-			// FIXME? options = append(options, "-o", WritebackCache())
-		}
+		//if opt.WritebackCache {
+		// FIXME? options = append(options, "-o", WritebackCache())
+		//}
 		if runtime.GOOS == "darwin" {
 			if opt.VolumeName != "" {
 				options = append(options, "-o", "volname="+opt.VolumeName)
@@ -119,16 +97,7 @@ func mountOptions(VFS *vfs.VFS, device string, mountpoint string, opt *mountlib.
 	for _, option := range opt.ExtraOptions {
 		options = append(options, "-o", option)
 	}
-	for _, option := range opt.ExtraFlags {
-		options = append(options, option)
-	}
-	if runtime.GOOS == "darwin" {
-		if !findOption("modules=iconv", options) {
-			iconv := "modules=iconv,from_code=UTF-8,to_code=UTF-8-MAC"
-			options = append(options, "-o", iconv)
-			fs.Debugf(nil, "Adding \"-o %s\" for macOS", iconv)
-		}
-	}
+	options = append(options, opt.ExtraFlags...)
 	return options
 }
 
@@ -154,21 +123,25 @@ func waitFor(fn func() bool) (ok bool) {
 // report an error when fusermount is called.
 func mount(VFS *vfs.VFS, mountPath string, opt *mountlib.Options) (<-chan error, func() error, error) {
 	// Get mountpoint using OS specific logic
-	mountpoint, err := getMountpoint(mountPath, opt)
+	f := VFS.Fs()
+	mountpoint, err := getMountpoint(f, mountPath, opt)
 	if err != nil {
 		return nil, nil, err
 	}
 	fs.Debugf(nil, "Mounting on %q (%q)", mountpoint, opt.VolumeName)
 
 	// Create underlying FS
-	f := VFS.Fs()
-	fsys := NewFS(VFS)
+	fsys := NewFS(VFS, opt)
 	host := fuse.NewFileSystemHost(fsys)
 	host.SetCapReaddirPlus(true) // only works on Windows
-	host.SetCapCaseInsensitive(f.Features().CaseInsensitive)
+	if opt.CaseInsensitive.Valid {
+		host.SetCapCaseInsensitive(opt.CaseInsensitive.Value)
+	} else {
+		host.SetCapCaseInsensitive(f.Features().CaseInsensitive)
+	}
 
 	// Create options
-	options := mountOptions(VFS, f.Name()+":"+f.Root(), mountpoint, opt)
+	options := mountOptions(VFS, opt.DeviceName, mountpoint, opt)
 	fs.Debugf(f, "Mounting with options: %q", options)
 
 	// Serve the mount point in the background returning error to errChan
@@ -193,7 +166,7 @@ func mount(VFS *vfs.VFS, mountPath string, opt *mountlib.Options) (<-chan error,
 		// Shutdown the VFS
 		fsys.VFS.Shutdown()
 		var umountOK bool
-		if atomic.LoadInt32(&fsys.destroyed) != 0 {
+		if fsys.destroyed.Load() != 0 {
 			fs.Debugf(nil, "Not calling host.Unmount as mount already Destroyed")
 			umountOK = true
 		} else if atexit.Signalled() {

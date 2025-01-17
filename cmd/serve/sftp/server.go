@@ -1,5 +1,4 @@
 //go:build !plan9
-// +build !plan9
 
 package sftp
 
@@ -17,7 +16,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
@@ -29,8 +27,9 @@ import (
 	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/lib/env"
 	"github.com/rclone/rclone/lib/file"
+	sdActivation "github.com/rclone/rclone/lib/sdactivation"
 	"github.com/rclone/rclone/vfs"
-	"github.com/rclone/rclone/vfs/vfsflags"
+	"github.com/rclone/rclone/vfs/vfscommon"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -56,7 +55,7 @@ func newServer(ctx context.Context, f fs.Fs, opt *Options) *server {
 	if proxyflags.Opt.AuthProxy != "" {
 		s.proxy = proxy.New(ctx, &proxyflags.Opt)
 	} else {
-		s.vfs = vfs.New(f, &vfsflags.Opt)
+		s.vfs = vfs.New(f, &vfscommon.Opt)
 	}
 	return s
 }
@@ -66,7 +65,7 @@ func (s *server) getVFS(what string, sshConn *ssh.ServerConn) (VFS *vfs.VFS) {
 	if s.proxy == nil {
 		return s.vfs
 	}
-	if sshConn.Permissions == nil && sshConn.Permissions.Extensions == nil {
+	if sshConn.Permissions == nil || sshConn.Permissions.Extensions == nil {
 		fs.Infof(what, "SSH Permissions Extensions not found")
 		return nil
 	}
@@ -135,7 +134,7 @@ func (s *server) serve() (err error) {
 	var authorizedKeysMap map[string]struct{}
 
 	// ensure the user isn't trying to use conflicting flags
-	if proxyflags.Opt.AuthProxy != "" && s.opt.AuthorizedKeys != "" && s.opt.AuthorizedKeys != DefaultOpt.AuthorizedKeys {
+	if proxyflags.Opt.AuthProxy != "" && s.opt.AuthorizedKeys != "" && s.opt.AuthorizedKeys != Opt.AuthorizedKeys {
 		return errors.New("--auth-proxy and --authorized-keys cannot be used at the same time")
 	}
 
@@ -144,8 +143,13 @@ func (s *server) serve() (err error) {
 		authKeysFile := env.ShellExpand(s.opt.AuthorizedKeys)
 		authorizedKeysMap, err = loadAuthorizedKeys(authKeysFile)
 		// If user set the flag away from the default then report an error
-		if err != nil && s.opt.AuthorizedKeys != DefaultOpt.AuthorizedKeys {
-			return err
+		if s.opt.AuthorizedKeys != Opt.AuthorizedKeys {
+			if err != nil {
+				return err
+			}
+			if len(authorizedKeysMap) == 0 {
+				return fmt.Errorf("failed to parse authorized keys")
+			}
 		}
 		fs.Logf(nil, "Loaded %d authorized keys from %q", len(authorizedKeysMap), authKeysFile)
 	}
@@ -268,10 +272,27 @@ func (s *server) serve() (err error) {
 
 	// Once a ServerConfig has been configured, connections can be
 	// accepted.
-	s.listener, err = net.Listen("tcp", s.opt.ListenAddr)
+	var listener net.Listener
+
+	// In case we run in a socket-activated environment, listen on (the first)
+	// passed FD.
+	sdListeners, err := sdActivation.Listeners()
 	if err != nil {
-		return fmt.Errorf("failed to listen for connection: %w", err)
+		return fmt.Errorf("unable to acquire listeners: %w", err)
 	}
+
+	if len(sdListeners) > 0 {
+		if len(sdListeners) > 1 {
+			fs.LogPrintf(fs.LogLevelWarning, nil, "more than one listener passed, ignoring all but the first.\n")
+		}
+		listener = sdListeners[0]
+	} else {
+		listener, err = net.Listen("tcp", s.opt.ListenAddr)
+		if err != nil {
+			return fmt.Errorf("failed to listen for connection: %w", err)
+		}
+	}
+	s.listener = listener
 	fs.Logf(nil, "SFTP server listening on %v\n", s.listener.Addr())
 
 	go s.acceptConnections()
@@ -311,7 +332,7 @@ func (s *server) Close() {
 }
 
 func loadPrivateKey(keyPath string) (ssh.Signer, error) {
-	privateBytes, err := ioutil.ReadFile(keyPath)
+	privateBytes, err := os.ReadFile(keyPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load private key: %w", err)
 	}
@@ -326,18 +347,17 @@ func loadPrivateKey(keyPath string) (ssh.Signer, error) {
 // the public key of a received connection
 // with the entries in the authorized_keys file.
 func loadAuthorizedKeys(authorizedKeysPath string) (authorizedKeysMap map[string]struct{}, err error) {
-	authorizedKeysBytes, err := ioutil.ReadFile(authorizedKeysPath)
+	authorizedKeysBytes, err := os.ReadFile(authorizedKeysPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load authorized keys: %w", err)
 	}
 	authorizedKeysMap = make(map[string]struct{})
 	for len(authorizedKeysBytes) > 0 {
 		pubKey, _, _, rest, err := ssh.ParseAuthorizedKey(authorizedKeysBytes)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse authorized keys: %w", err)
+		if err == nil {
+			authorizedKeysMap[string(pubKey.Marshal())] = struct{}{}
+			authorizedKeysBytes = bytes.TrimSpace(rest)
 		}
-		authorizedKeysMap[string(pubKey.Marshal())] = struct{}{}
-		authorizedKeysBytes = bytes.TrimSpace(rest)
 	}
 	return authorizedKeysMap, nil
 }
@@ -369,7 +389,7 @@ func makeRSASSHKeyPair(bits int, pubKeyPath, privateKeyPath string) (err error) 
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(pubKeyPath, ssh.MarshalAuthorizedKey(pub), 0644)
+	return os.WriteFile(pubKeyPath, ssh.MarshalAuthorizedKey(pub), 0644)
 }
 
 // makeECDSASSHKeyPair make a pair of public and private keys for ECDSA SSH access.
@@ -401,7 +421,7 @@ func makeECDSASSHKeyPair(pubKeyPath, privateKeyPath string) (err error) {
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(pubKeyPath, ssh.MarshalAuthorizedKey(pub), 0644)
+	return os.WriteFile(pubKeyPath, ssh.MarshalAuthorizedKey(pub), 0644)
 }
 
 // makeEd25519SSHKeyPair make a pair of public and private keys for Ed25519 SSH access.
@@ -433,5 +453,5 @@ func makeEd25519SSHKeyPair(pubKeyPath, privateKeyPath string) (err error) {
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(pubKeyPath, ssh.MarshalAuthorizedKey(pub), 0644)
+	return os.WriteFile(pubKeyPath, ssh.MarshalAuthorizedKey(pub), 0644)
 }

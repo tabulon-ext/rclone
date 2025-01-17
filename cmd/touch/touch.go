@@ -1,3 +1,4 @@
+// Package touch provides the touch command.
 package touch
 
 import (
@@ -10,6 +11,7 @@ import (
 	"github.com/rclone/rclone/cmd"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/flags"
+	"github.com/rclone/rclone/fs/fspath"
 	"github.com/rclone/rclone/fs/object"
 	"github.com/rclone/rclone/fs/operations"
 	"github.com/spf13/cobra"
@@ -31,17 +33,16 @@ const (
 func init() {
 	cmd.Root.AddCommand(commandDefinition)
 	cmdFlags := commandDefinition.Flags()
-	flags.BoolVarP(cmdFlags, &notCreateNewFile, "no-create", "C", false, "Do not create the file if it does not exist (implied with --recursive)")
-	flags.StringVarP(cmdFlags, &timeAsArgument, "timestamp", "t", "", "Use specified time instead of the current time of day")
-	flags.BoolVarP(cmdFlags, &localTime, "localtime", "", false, "Use localtime for timestamp, not UTC")
-	flags.BoolVarP(cmdFlags, &recursive, "recursive", "R", false, "Recursively touch all files")
+	flags.BoolVarP(cmdFlags, &notCreateNewFile, "no-create", "C", false, "Do not create the file if it does not exist (implied with --recursive)", "")
+	flags.StringVarP(cmdFlags, &timeAsArgument, "timestamp", "t", "", "Use specified time instead of the current time of day", "")
+	flags.BoolVarP(cmdFlags, &localTime, "localtime", "", false, "Use localtime for timestamp, not UTC", "")
+	flags.BoolVarP(cmdFlags, &recursive, "recursive", "R", false, "Recursively touch all files", "")
 }
 
 var commandDefinition = &cobra.Command{
 	Use:   "touch remote:path",
 	Short: `Create new file or change file modification time.`,
-	Long: `
-Set the modification time on file(s) as specified by remote:path to
+	Long: `Set the modification time on file(s) as specified by remote:path to
 have the current time.
 
 If remote:path does not exist then a zero sized file will be created,
@@ -49,7 +50,7 @@ unless ` + "`--no-create`" + ` or ` + "`--recursive`" + ` is provided.
 
 If ` + "`--recursive`" + ` is used then recursively sets the modification
 time on all existing files that is found under the path. Filters are supported,
-and you can test with the ` + "`--dry-run`" + ` or the ` + "`--interactive`" + ` flag.
+and you can test with the ` + "`--dry-run`" + ` or the ` + "`--interactive`/`-i`" + ` flag.
 
 If ` + "`--timestamp`" + ` is used then sets the modification time to that
 time instead of the current time. Times may be specified as one of:
@@ -61,13 +62,36 @@ time instead of the current time. Times may be specified as one of:
 Note that value of ` + "`--timestamp`" + ` is in UTC. If you want local time
 then add the ` + "`--localtime`" + ` flag.
 `,
+	Annotations: map[string]string{
+		"versionIntroduced": "v1.39",
+		"groups":            "Filter,Listing,Important",
+	},
 	Run: func(command *cobra.Command, args []string) {
 		cmd.CheckArgs(1, 1, command, args)
-		f, fileName := cmd.NewFsFile(args[0])
+		f, remote := newFsDst(args)
 		cmd.Run(true, false, command, func() error {
-			return Touch(context.Background(), f, fileName)
+			return Touch(context.Background(), f, remote)
 		})
 	},
+}
+
+// newFsDst creates a new dst fs from the arguments.
+//
+// The returned fs will never point to a file. It will point to the
+// parent directory of specified path, and is returned together with
+// the basename of file or directory, except if argument is only a
+// remote name. Similar to cmd.NewFsDstFile, but without raising fatal
+// when name of file or directory is empty (e.g. "remote:" or "remote:path/").
+func newFsDst(args []string) (f fs.Fs, remote string) {
+	root, remote, err := fspath.Split(args[0])
+	if err != nil {
+		fs.Fatalf(nil, "Parsing %q failed: %v", args[0], err)
+	}
+	if root == "" {
+		root = "."
+	}
+	f = cmd.NewFsDir([]string{root})
+	return f, remote
 }
 
 // parseTimeArgument parses a timestamp string according to specific layouts
@@ -107,47 +131,56 @@ func createEmptyObject(ctx context.Context, remote string, modTime time.Time, f 
 }
 
 // Touch create new file or change file modification time.
-func Touch(ctx context.Context, f fs.Fs, fileName string) error {
+func Touch(ctx context.Context, f fs.Fs, remote string) error {
 	t, err := timeOfTouch()
 	if err != nil {
 		return err
 	}
 	fs.Debugf(nil, "Touch time %v", t)
-	file, err := f.NewObject(ctx, fileName)
+	var file fs.Object
+	if remote == "" {
+		err = fs.ErrorIsDir
+	} else {
+		file, err = f.NewObject(ctx, remote)
+	}
 	if err != nil {
 		if errors.Is(err, fs.ErrorObjectNotFound) {
-			// Touch single non-existent file
+			// Touching non-existent path, possibly creating it as new file
+			if remote == "" {
+				fs.Logf(f, "Not touching empty directory")
+				return nil
+			}
 			if notCreateNewFile {
-				fs.Logf(f, "Not touching non-existent file due to --no-create")
+				fs.Logf(f, "Not touching nonexistent file due to --no-create")
 				return nil
 			}
 			if recursive {
-				fs.Logf(f, "Not touching non-existent file due to --recursive")
+				// For consistency, --recursive never creates new files.
+				fs.Logf(f, "Not touching nonexistent file due to --recursive")
 				return nil
 			}
 			if operations.SkipDestructive(ctx, f, "touch (create)") {
 				return nil
 			}
-			fs.Debugf(f, "Touching (creating)")
-			if err = createEmptyObject(ctx, fileName, t, f); err != nil {
+			fs.Debugf(f, "Touching (creating) %q", remote)
+			if err = createEmptyObject(ctx, remote, t, f); err != nil {
 				return fmt.Errorf("failed to touch (create): %w", err)
 			}
 		}
 		if errors.Is(err, fs.ErrorIsDir) {
+			// Touching existing directory
 			if recursive {
-				// Touch existing directory, recursive
-				fs.Debugf(nil, "Touching files in directory recursively")
-				return operations.TouchDir(ctx, f, t, true)
+				fs.Debugf(f, "Touching recursively files in directory %q", remote)
+				return operations.TouchDir(ctx, f, remote, t, true)
 			}
-			// Touch existing directory without recursing
-			fs.Debugf(nil, "Touching files in directory non-recursively")
-			return operations.TouchDir(ctx, f, t, false)
+			fs.Debugf(f, "Touching non-recursively files in directory %q", remote)
+			return operations.TouchDir(ctx, f, remote, t, false)
 		}
 		return err
 	}
 	// Touch single existing file
-	if !operations.SkipDestructive(ctx, fileName, "touch") {
-		fs.Debugf(f, "Touching %q", fileName)
+	if !operations.SkipDestructive(ctx, remote, "touch") {
+		fs.Debugf(f, "Touching %q", remote)
 		err = file.SetModTime(ctx, t)
 		if err != nil {
 			return fmt.Errorf("failed to touch: %w", err)

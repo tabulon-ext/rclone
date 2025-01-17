@@ -1,3 +1,4 @@
+// Package serve provides the serve command.
 package serve
 
 import (
@@ -8,7 +9,9 @@ import (
 	"github.com/rclone/rclone/cmd/serve/docker"
 	"github.com/rclone/rclone/cmd/serve/ftp"
 	"github.com/rclone/rclone/cmd/serve/http"
+	"github.com/rclone/rclone/cmd/serve/nfs"
 	"github.com/rclone/rclone/cmd/serve/restic"
+	"github.com/rclone/rclone/cmd/serve/s3"
 	"github.com/rclone/rclone/cmd/serve/sftp"
 	"github.com/rclone/rclone/cmd/serve/webdav"
 	"github.com/spf13/cobra"
@@ -34,6 +37,12 @@ func init() {
 	if docker.Command != nil {
 		Command.AddCommand(docker.Command)
 	}
+	if nfs.Command != nil {
+		Command.AddCommand(nfs.Command)
+	}
+	if s3.Command != nil {
+		Command.AddCommand(s3.Command)
+	}
 	cmd.Root.AddCommand(Command)
 }
 
@@ -41,13 +50,16 @@ func init() {
 var Command = &cobra.Command{
 	Use:   "serve <protocol> [opts] <remote>",
 	Short: `Serve a remote over a protocol.`,
-	Long: `rclone serve is used to serve a remote over a given protocol. This
-command requires the use of a subcommand to specify the protocol, e.g.
+	Long: `Serve a remote over a given protocol. Requires the use of a
+subcommand to specify the protocol, e.g.
 
     rclone serve http remote:
 
 Each subcommand has its own options which you can see in their help.
 `,
+	Annotations: map[string]string{
+		"versionIntroduced": "v1.39",
+	},
 	RunE: func(command *cobra.Command, args []string) error {
 		if len(args) == 0 {
 			return errors.New("serve requires a protocol, e.g. 'rclone serve http remote:'")

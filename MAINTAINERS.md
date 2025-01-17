@@ -15,7 +15,14 @@ Current active maintainers of rclone are:
 | Ivan Andreev     | @ivandeex         | chunker & mailru backends    |
 | Max Sum          | @Max-Sum          | union backend                |
 | Fred             | @creativeprojects | seafile backend              |
-| Caleb Case       | @calebcase        | tardigrade backend           |
+| Caleb Case       | @calebcase        | storj backend                |
+| wiserain         | @wiserain         | pikpak backend               |
+| albertony        | @albertony        |                              |
+| Chun-Hung Tseng  | @henrybear327     | Proton Drive Backend         |
+| Hideo Aoyama     | @boukendesho      | snap packaging               |
+| nielash          | @nielash          | bisync                       |
+| Dan McArdle      | @dmcardle         | gitannex                     |
+| Sam Harrison     | @childish-sambino | filescom                     |
 
 **This is a work in progress Draft**
 

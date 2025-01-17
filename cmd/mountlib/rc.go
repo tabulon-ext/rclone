@@ -3,15 +3,13 @@ package mountlib
 import (
 	"context"
 	"errors"
-	"log"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/rc"
-	"github.com/rclone/rclone/vfs"
-	"github.com/rclone/rclone/vfs/vfsflags"
+	"github.com/rclone/rclone/vfs/vfscommon"
 )
 
 var (
@@ -86,7 +84,7 @@ func mountRc(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 		return nil, err
 	}
 
-	vfsOpt := vfsflags.Opt
+	vfsOpt := vfscommon.Opt
 	err = in.GetStructMissingOK("vfsOpt", &vfsOpt)
 	if err != nil {
 		return nil, err
@@ -96,6 +94,10 @@ func mountRc(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 	err = in.GetStructMissingOK("mountOpt", &mountOpt)
 	if err != nil {
 		return nil, err
+	}
+
+	if mountOpt.Daemon {
+		return nil, errors.New("daemon option not supported over the API")
 	}
 
 	mountType, err := in.GetString("mountType")
@@ -108,7 +110,7 @@ func mountRc(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 	}
 	mountType, mountFn := ResolveMountMethod(mountType)
 	if mountFn == nil {
-		return nil, errors.New("Mount Option specified is not registered, or is invalid")
+		return nil, errors.New("mount option specified is not registered, or is invalid")
 	}
 
 	// Get Fs.fs to be mounted from fs parameter in the params
@@ -117,23 +119,23 @@ func mountRc(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 		return nil, err
 	}
 
-	VFS := vfs.New(fdst, &vfsOpt)
-	_, unmountFn, err := mountFn(VFS, mountPoint, &mountOpt)
+	mnt := NewMountPoint(mountFn, mountPoint, fdst, &mountOpt, &vfsOpt)
+	_, err = mnt.Mount()
 	if err != nil {
-		log.Printf("mount FAILED: %v", err)
+		fs.Logf(nil, "mount FAILED: %v", err)
 		return nil, err
 	}
-
+	go func() {
+		if err = mnt.Wait(); err != nil {
+			fs.Logf(nil, "unmount FAILED: %v", err)
+			return
+		}
+		mountMu.Lock()
+		defer mountMu.Unlock()
+		delete(liveMounts, mountPoint)
+	}()
 	// Add mount to list if mount point was successfully created
-	liveMounts[mountPoint] = &MountPoint{
-		MountPoint: mountPoint,
-		MountedOn:  time.Now(),
-		MountFn:    mountFn,
-		UnmountFn:  unmountFn,
-		MountOpt:   mountOpt,
-		VFSOpt:     vfsOpt,
-		Fs:         fdst,
-	}
+	liveMounts[mountPoint] = mnt
 
 	fs.Debugf(nil, "Mount for %s created at %s using %s", fdst.String(), mountPoint, mountType)
 	return nil, nil
@@ -255,7 +257,7 @@ func listMountsRc(_ context.Context, in rc.Params) (out rc.Params, err error) {
 	for _, k := range keys {
 		m := liveMounts[k]
 		info := MountInfo{
-			Fs:         m.Fs.Name(),
+			Fs:         fs.ConfigString(m.Fs),
 			MountPoint: m.MountPoint,
 			MountedOn:  m.MountedOn,
 		}
@@ -271,8 +273,11 @@ func init() {
 		Path:         "mount/unmountall",
 		AuthRequired: true,
 		Fn:           unmountAll,
-		Title:        "Show current mount points",
-		Help: `This shows currently mounted points, which can be used for performing an unmount.
+		Title:        "Unmount all active mounts",
+		Help: `
+rclone allows Linux, FreeBSD, macOS and Windows to
+mount any of Rclone's cloud storage systems as a file system with
+FUSE.
 
 This takes no parameters and returns error if unmount does not succeed.
 

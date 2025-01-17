@@ -1,3 +1,4 @@
+// Package link provides the link command.
 package link
 
 import (
@@ -19,15 +20,14 @@ var (
 func init() {
 	cmd.Root.AddCommand(commandDefinition)
 	cmdFlags := commandDefinition.Flags()
-	flags.FVarP(cmdFlags, &expire, "expire", "", "The amount of time that the link will be valid")
-	flags.BoolVarP(cmdFlags, &unlink, "unlink", "", unlink, "Remove existing public link to file/folder")
+	flags.FVarP(cmdFlags, &expire, "expire", "", "The amount of time that the link will be valid", "")
+	flags.BoolVarP(cmdFlags, &unlink, "unlink", "", unlink, "Remove existing public link to file/folder", "")
 }
 
 var commandDefinition = &cobra.Command{
 	Use:   "link remote:path",
 	Short: `Generate public link to file/folder.`,
-	Long: `rclone link will create, retrieve or remove a public link to the given
-file or folder.
+	Long: `Create, retrieve or remove a public link to the given file or folder.
 
     rclone link remote:path/to/file
     rclone link remote:path/to/folder/
@@ -48,6 +48,9 @@ link. Exact capabilities depend on the remote, but the link will
 always by default be created with the least constraints – e.g. no
 expiry, no password protection, accessible without account.
 `,
+	Annotations: map[string]string{
+		"versionIntroduced": "v1.41",
+	},
 	Run: func(command *cobra.Command, args []string) {
 		cmd.CheckArgs(1, 1, command, args)
 		fsrc, remote := cmd.NewFsFile(args[0])

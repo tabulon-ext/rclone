@@ -1,3 +1,4 @@
+// Package hash provides hash utilities for Fs.
 package hash
 
 import (
@@ -52,6 +53,16 @@ func RegisterHash(name, alias string, width int, newFunc func() hash.Hash) Type 
 	alias2hash[alias] = definition
 
 	return hashType
+}
+
+// SupportOnly makes the hash package only support the types passed
+// in. Used for testing.
+//
+// It returns the previously supported types.
+func SupportOnly(new []Type) (old []Type) {
+	old = supported
+	supported = new
+	return old
 }
 
 // ErrUnsupported should be returned by filesystem,
@@ -153,7 +164,7 @@ func (h *Type) Set(s string) error {
 		*h = hash.hashType
 		return nil
 	}
-	return fmt.Errorf("Unknown hash type %q", s)
+	return fmt.Errorf("unknown hash type %q", s)
 }
 
 // Type of the value

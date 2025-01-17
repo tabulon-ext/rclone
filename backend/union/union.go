@@ -1,3 +1,4 @@
+// Package union implements a virtual provider to join existing remotes.
 package union
 
 import (
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rclone/rclone/backend/union/common"
 	"github.com/rclone/rclone/backend/union/policy"
 	"github.com/rclone/rclone/backend/union/upstream"
 	"github.com/rclone/rclone/fs"
@@ -28,6 +30,9 @@ func init() {
 		Name:        "union",
 		Description: "Union merges the contents of several upstream fs",
 		NewFs:       NewFs,
+		MetadataInfo: &fs.MetadataInfo{
+			Help: `Any metadata supported by the underlying remote is read and written.`,
+		},
 		Options: []fs.Option{{
 			Name:     "upstreams",
 			Help:     "List of space separated upstreams.\n\nCan be 'upstreama:test/dir upstreamb:', '\"upstreama:test/space:ro dir\" upstreamb:', etc.",
@@ -48,26 +53,24 @@ func init() {
 			Name:    "cache_time",
 			Help:    "Cache time of usage and free space (in seconds).\n\nThis option is only useful when a path preserving policy is used.",
 			Default: 120,
+		}, {
+			Name: "min_free_space",
+			Help: `Minimum viable free space for lfs/eplfs policies.
+
+If a remote has less than this much free space then it won't be
+considered for use in lfs or eplfs policies.`,
+			Advanced: true,
+			Default:  fs.Gibi,
 		}},
 	}
 	fs.Register(fsi)
-}
-
-// Options defines the configuration for this backend
-type Options struct {
-	Upstreams    fs.SpaceSepList `config:"upstreams"`
-	Remotes      fs.SpaceSepList `config:"remotes"` // Deprecated
-	ActionPolicy string          `config:"action_policy"`
-	CreatePolicy string          `config:"create_policy"`
-	SearchPolicy string          `config:"search_policy"`
-	CacheTime    int             `config:"cache_time"`
 }
 
 // Fs represents a union of upstreams
 type Fs struct {
 	name         string         // name of this remote
 	features     *fs.Features   // optional features
-	opt          Options        // options for this Fs
+	opt          common.Options // options for this Fs
 	root         string         // the path we are working on
 	upstreams    []*upstream.Fs // slice of upstreams
 	hashSet      hash.Set       // intersection of hash types
@@ -82,16 +85,17 @@ func (f *Fs) wrapEntries(entries ...upstream.Entry) (entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	switch e.(type) {
+	switch e := e.(type) {
 	case *upstream.Object:
 		return &Object{
-			Object: e.(*upstream.Object),
+			Object: e,
 			fs:     f,
 			co:     entries,
 		}, nil
 	case *upstream.Directory:
 		return &Directory{
-			Directory: e.(*upstream.Directory),
+			Directory: e,
+			fs:        f,
 			cd:        entries,
 		}, nil
 	default:
@@ -123,6 +127,11 @@ func (f *Fs) Features() *fs.Features {
 func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 	upstreams, err := f.action(ctx, dir)
 	if err != nil {
+		// If none of the backends can have empty directories then
+		// don't complain about directories not being found
+		if !f.features.CanHaveEmptyDirectories && err == fs.ErrorObjectNotFound {
+			return nil
+		}
 		return err
 	}
 	errs := Errors(make([]error, len(upstreams)))
@@ -140,22 +149,20 @@ func (f *Fs) Hashes() hash.Set {
 	return f.hashSet
 }
 
-// Mkdir makes the root directory of the Fs object
-func (f *Fs) Mkdir(ctx context.Context, dir string) error {
+// mkdir makes the directory passed in and returns the upstreams used
+func (f *Fs) mkdir(ctx context.Context, dir string) ([]*upstream.Fs, error) {
 	upstreams, err := f.create(ctx, dir)
 	if err == fs.ErrorObjectNotFound {
-		if dir != parentDir(dir) {
-			if err := f.Mkdir(ctx, parentDir(dir)); err != nil {
-				return err
-			}
-			upstreams, err = f.create(ctx, dir)
+		parent := parentDir(dir)
+		if dir != parent {
+			upstreams, err = f.mkdir(ctx, parent)
 		} else if dir == "" {
 			// If root dirs not created then create them
 			upstreams, err = f.upstreams, nil
 		}
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	errs := Errors(make([]error, len(upstreams)))
 	multithread(len(upstreams), func(i int) {
@@ -164,7 +171,66 @@ func (f *Fs) Mkdir(ctx context.Context, dir string) error {
 			errs[i] = fmt.Errorf("%s: %w", upstreams[i].Name(), err)
 		}
 	})
-	return errs.Err()
+	err = errs.Err()
+	if err != nil {
+		return nil, err
+	}
+	// If created roots then choose one
+	if dir == "" {
+		upstreams, err = f.create(ctx, dir)
+	}
+	return upstreams, err
+}
+
+// Mkdir makes the root directory of the Fs object
+func (f *Fs) Mkdir(ctx context.Context, dir string) error {
+	_, err := f.mkdir(ctx, dir)
+	return err
+}
+
+// MkdirMetadata makes the root directory of the Fs object
+func (f *Fs) MkdirMetadata(ctx context.Context, dir string, metadata fs.Metadata) (fs.Directory, error) {
+	upstreams, err := f.create(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	errs := Errors(make([]error, len(upstreams)))
+	entries := make([]upstream.Entry, len(upstreams))
+	multithread(len(upstreams), func(i int) {
+		u := upstreams[i]
+		if do := u.Features().MkdirMetadata; do != nil {
+			newDir, err := do(ctx, dir, metadata)
+			if err != nil {
+				errs[i] = fmt.Errorf("%s: %w", upstreams[i].Name(), err)
+			} else {
+				entries[i], err = u.WrapEntry(newDir)
+				if err != nil {
+					errs[i] = fmt.Errorf("%s: %w", upstreams[i].Name(), err)
+				}
+			}
+
+		} else {
+			// Just do Mkdir on upstreams which don't support MkdirMetadata
+			err := u.Mkdir(ctx, dir)
+			if err != nil {
+				errs[i] = fmt.Errorf("%s: %w", upstreams[i].Name(), err)
+			}
+		}
+	})
+	err = errs.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	entry, err := f.wrapEntries(entries...)
+	if err != nil {
+		return nil, err
+	}
+	newDir, ok := entry.(fs.Directory)
+	if !ok {
+		return nil, fmt.Errorf("internal error: expecting %T to be an fs.Directory", entry)
+	}
+	return newDir, nil
 }
 
 // Purge all files in the directory
@@ -198,9 +264,9 @@ func (f *Fs) Purge(ctx context.Context, dir string) error {
 
 // Copy src to this remote using server-side copy operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -211,7 +277,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		fs.Debugf(src, "Can't copy - not same remote type")
 		return nil, fs.ErrorCantCopy
 	}
-	o := srcObj.UnWrap()
+	o := srcObj.UnWrapUpstream()
 	su := o.UpstreamFs()
 	if su.Features().Copy == nil {
 		return nil, fs.ErrorCantCopy
@@ -238,9 +304,9 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 
 // Move src to this remote using server-side move operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -371,6 +437,26 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 	return fs.ErrorDirExists
 }
 
+// DirSetModTime sets the directory modtime for dir
+func (f *Fs) DirSetModTime(ctx context.Context, dir string, modTime time.Time) error {
+	upstreams, err := f.action(ctx, dir)
+	if err != nil {
+		return err
+	}
+	errs := Errors(make([]error, len(upstreams)))
+	multithread(len(upstreams), func(i int) {
+		u := upstreams[i]
+		// ignore DirSetModTime on upstreams which don't support it
+		if do := u.Features().DirSetModTime; do != nil {
+			err := do(ctx, dir, modTime)
+			if err != nil {
+				errs[i] = fmt.Errorf("%s: %w", upstreams[i].Name(), err)
+			}
+		}
+	})
+	return errs.Err()
+}
+
 // ChangeNotify calls the passed function with a path
 // that has had changes. If the implementation
 // uses polling, it should adhere to the given interval.
@@ -448,10 +534,7 @@ func (f *Fs) put(ctx context.Context, in io.Reader, src fs.ObjectInfo, stream bo
 	srcPath := src.Remote()
 	upstreams, err := f.create(ctx, srcPath)
 	if err == fs.ErrorObjectNotFound {
-		if err := f.Mkdir(ctx, parentDir(srcPath)); err != nil {
-			return nil, err
-		}
-		upstreams, err = f.create(ctx, srcPath)
+		upstreams, err = f.mkdir(ctx, parentDir(srcPath))
 	}
 	if err != nil {
 		return nil, err
@@ -486,6 +569,10 @@ func (f *Fs) put(ctx context.Context, in io.Reader, src fs.ObjectInfo, stream bo
 		}
 		if err != nil {
 			errs[i] = fmt.Errorf("%s: %w", u.Name(), err)
+			if len(upstreams) > 1 {
+				// Drain the input buffer to allow other uploads to continue
+				_, _ = io.Copy(io.Discard, readers[i])
+			}
 			return
 		}
 		objs[i] = u.WrapObject(o)
@@ -740,14 +827,6 @@ func (f *Fs) create(ctx context.Context, path string) ([]*upstream.Fs, error) {
 	return f.createPolicy.Create(ctx, f.upstreams, path)
 }
 
-func (f *Fs) createEntries(entries ...upstream.Entry) ([]upstream.Entry, error) {
-	return f.createPolicy.CreateEntries(entries...)
-}
-
-func (f *Fs) search(ctx context.Context, path string) (*upstream.Fs, error) {
-	return f.searchPolicy.Search(ctx, f.upstreams, path)
-}
-
 func (f *Fs) searchEntries(entries ...upstream.Entry) (upstream.Entry, error) {
 	return f.searchPolicy.SearchEntries(entries...)
 }
@@ -793,12 +872,30 @@ func (f *Fs) Shutdown(ctx context.Context) error {
 	return errs.Err()
 }
 
+// CleanUp the trash in the Fs
+//
+// Implement this if you have a way of emptying the trash or
+// otherwise cleaning up old versions of files.
+func (f *Fs) CleanUp(ctx context.Context) error {
+	errs := Errors(make([]error, len(f.upstreams)))
+	multithread(len(f.upstreams), func(i int) {
+		u := f.upstreams[i]
+		if do := u.Features().CleanUp; do != nil {
+			err := do(ctx)
+			if err != nil {
+				errs[i] = fmt.Errorf("%s: %w", u.Name(), err)
+			}
+		}
+	})
+	return errs.Err()
+}
+
 // NewFs constructs an Fs from the path.
 //
 // The returned Fs is the actual Fs, referenced by remote in the config
 func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, error) {
 	// Parse config into Options struct
-	opt := new(Options)
+	opt := new(common.Options)
 	err := configstruct.Set(m, opt)
 	if err != nil {
 		return nil, err
@@ -806,7 +903,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	// Backward compatible to old config
 	if len(opt.Upstreams) == 0 && len(opt.Remotes) > 0 {
 		for i := 0; i < len(opt.Remotes)-1; i++ {
-			opt.Remotes[i] = opt.Remotes[i] + ":ro"
+			opt.Remotes[i] += ":ro"
 		}
 		opt.Upstreams = opt.Remotes
 	}
@@ -822,11 +919,12 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		}
 	}
 
+	root = strings.Trim(root, "/")
 	upstreams := make([]*upstream.Fs, len(opt.Upstreams))
 	errs := Errors(make([]error, len(opt.Upstreams)))
 	multithread(len(opt.Upstreams), func(i int) {
 		u := opt.Upstreams[i]
-		upstreams[i], errs[i] = upstream.New(ctx, u, root, time.Duration(opt.CacheTime)*time.Second)
+		upstreams[i], errs[i] = upstream.New(ctx, u, root, opt)
 	})
 	var usedUpstreams []*upstream.Fs
 	var fserr error
@@ -850,6 +948,17 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		opt:       *opt,
 		upstreams: usedUpstreams,
 	}
+	// Correct root if definitely pointing to a file
+	if fserr == fs.ErrorIsFile {
+		f.root = path.Dir(f.root)
+		if f.root == "." || f.root == "/" {
+			f.root = ""
+		}
+	}
+	err = upstream.Prepare(f.upstreams)
+	if err != nil {
+		return nil, err
+	}
 	f.actionPolicy, err = policy.Get(opt.ActionPolicy)
 	if err != nil {
 		return nil, err
@@ -864,26 +973,39 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	}
 	fs.Debugf(f, "actionPolicy = %T, createPolicy = %T, searchPolicy = %T", f.actionPolicy, f.createPolicy, f.searchPolicy)
 	var features = (&fs.Features{
-		CaseInsensitive:         true,
-		DuplicateFiles:          false,
-		ReadMimeType:            true,
-		WriteMimeType:           true,
-		CanHaveEmptyDirectories: true,
-		BucketBased:             true,
-		SetTier:                 true,
-		GetTier:                 true,
+		CaseInsensitive:          true,
+		DuplicateFiles:           false,
+		ReadMimeType:             true,
+		WriteMimeType:            true,
+		CanHaveEmptyDirectories:  true,
+		BucketBased:              true,
+		SetTier:                  true,
+		GetTier:                  true,
+		ReadMetadata:             true,
+		WriteMetadata:            true,
+		UserMetadata:             true,
+		ReadDirMetadata:          true,
+		WriteDirMetadata:         true,
+		WriteDirSetModTime:       true,
+		UserDirMetadata:          true,
+		DirModTimeUpdatesOnWrite: true,
+		PartialUploads:           true,
 	}).Fill(ctx, f)
-	canMove := true
+	canMove, slowHash := true, false
 	for _, f := range upstreams {
 		features = features.Mask(ctx, f) // Mask all upstream fs
 		if !operations.CanServerSideMove(f) {
 			canMove = false
 		}
+		slowHash = slowHash || f.Features().SlowHash
 	}
 	// We can move if all remotes support Move or Copy
 	if canMove {
 		features.Move = f.Move
 	}
+
+	// If any of upstreams are SlowHash, propagate it
+	features.SlowHash = slowHash
 
 	// Enable ListR when upstreams either support ListR or is local
 	// But not when all upstreams are local
@@ -897,6 +1019,9 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 			}
 		}
 	}
+
+	// show that we wrap other backends
+	features.Overlay = true
 
 	f.features = features
 
@@ -939,9 +1064,12 @@ var (
 	_ fs.Copier          = (*Fs)(nil)
 	_ fs.Mover           = (*Fs)(nil)
 	_ fs.DirMover        = (*Fs)(nil)
+	_ fs.DirSetModTimer  = (*Fs)(nil)
+	_ fs.MkdirMetadataer = (*Fs)(nil)
 	_ fs.DirCacheFlusher = (*Fs)(nil)
 	_ fs.ChangeNotifier  = (*Fs)(nil)
 	_ fs.Abouter         = (*Fs)(nil)
 	_ fs.ListRer         = (*Fs)(nil)
 	_ fs.Shutdowner      = (*Fs)(nil)
+	_ fs.CleanUpper      = (*Fs)(nil)
 )

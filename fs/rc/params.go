@@ -48,7 +48,6 @@ func NotErrParamNotFound(err error) bool {
 // ErrParamInvalid - this is returned from the Get* functions if the
 // parameter is invalid.
 //
-//
 // Returning an error of this type from an rc.Func will cause the http
 // method to return http.StatusBadRequest
 type ErrParamInvalid struct {
@@ -282,6 +281,12 @@ func (p Params) GetDuration(key string) (time.Duration, error) {
 		return 0, ErrParamInvalid{fmt.Errorf("parse duration: %w", err)}
 	}
 	return duration, nil
+}
+
+// GetFsDuration get the duration parameters from in
+func (p Params) GetFsDuration(key string) (fs.Duration, error) {
+	d, err := p.GetDuration(key)
+	return fs.Duration(d), err
 }
 
 // Error creates the standard response for an errored rc call using an

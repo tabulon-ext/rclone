@@ -17,7 +17,7 @@ func TestMkdir(t *testing.T) {
 	// test stuff
 }
 
-This will make r.Fremote and r.Flocal for a remote remote and a local
+This will make r.Fremote and r.Flocal for a remote and a local
 remote.  The remote is determined by the -remote flag passed in.
 
 */
@@ -29,7 +29,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"path"
@@ -99,7 +98,7 @@ func newRun() *Run {
 		r.Fatalf("Failed to open remote %q: %v", *RemoteName, err)
 	}
 
-	r.LocalName, err = ioutil.TempDir("", "rclone")
+	r.LocalName, err = os.MkdirTemp("", "rclone")
 	if err != nil {
 		r.Fatalf("Failed to create temp dir: %v", err)
 	}
@@ -179,6 +178,7 @@ func newRunIndividual(t *testing.T, individual bool) *Run {
 	r.Logf = t.Logf
 	r.Fatalf = t.Fatalf
 	r.Logf("Remote %q, Local %q, Modify Window %q", r.Fremote, r.Flocal, fs.GetModifyWindow(ctx, r.Fremote))
+	t.Cleanup(r.Finalise)
 	return r
 }
 
@@ -187,8 +187,6 @@ func newRunIndividual(t *testing.T, individual bool) *Run {
 //
 // r.Flocal is an empty local Fs
 // r.Fremote is an empty remote Fs
-//
-// Finalise() will tidy them away when done.
 func NewRun(t *testing.T) *Run {
 	return newRunIndividual(t, *Individual)
 }
@@ -221,7 +219,7 @@ func (r *Run) WriteFile(filePath, content string, t time.Time) Item {
 	if err != nil {
 		r.Fatalf("Failed to make directories %q: %v", dirPath, err)
 	}
-	err = ioutil.WriteFile(filePath, []byte(content), 0600)
+	err = os.WriteFile(filePath, []byte(content), 0600)
 	if err != nil {
 		r.Fatalf("Failed to write file %q: %v", filePath, err)
 	}
@@ -360,6 +358,20 @@ func (r *Run) CheckLocalListing(t *testing.T, items []Item, expectedDirs []strin
 // directories.
 func (r *Run) CheckRemoteListing(t *testing.T, items []Item, expectedDirs []string) {
 	CheckListingWithPrecision(t, r.Fremote, items, expectedDirs, r.Precision)
+}
+
+// CheckDirectoryModTimes checks that the directory names in r.Flocal has the correct modtime compared to r.Fremote
+func (r *Run) CheckDirectoryModTimes(t *testing.T, names ...string) {
+	if r.Fremote.Features().DirSetModTime == nil && r.Fremote.Features().MkdirMetadata == nil {
+		fs.Debugf(r.Fremote, "Skipping modtime test as remote does not support DirSetModTime or MkdirMetadata")
+		return
+	}
+	ctx := context.Background()
+	for _, name := range names {
+		wantT := NewDirectory(ctx, t, r.Flocal, name).ModTime(ctx)
+		got := NewDirectory(ctx, t, r.Fremote, name)
+		CheckDirModTime(ctx, t, r.Fremote, got, wantT)
+	}
 }
 
 // Clean the temporary directory

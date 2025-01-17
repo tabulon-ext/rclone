@@ -35,6 +35,7 @@ type March struct {
 	srcListDir listDirFn // function to call to list a directory in the src
 	dstListDir listDirFn // function to call to list a directory in the dst
 	transforms []matchTransformFn
+	limiter    chan struct{} // make sure we don't do too many operations at once
 }
 
 // Marcher is called on each match
@@ -69,6 +70,8 @@ func (m *March) init(ctx context.Context) {
 	if m.Fdst.Features().CaseInsensitive || ci.IgnoreCaseSync {
 		m.transforms = append(m.transforms, strings.ToLower)
 	}
+	// Limit parallelism for operations
+	m.limiter = make(chan struct{}, ci.Checkers)
 }
 
 // list a directory into entries, err
@@ -83,7 +86,7 @@ func (m *March) makeListDir(ctx context.Context, f fs.Fs, includeAll bool) listD
 	if !(ci.UseListR && f.Features().ListR != nil) && // !--fast-list active and
 		!(ci.NoTraverse && fi.HaveFilesFrom()) { // !(--files-from and --no-traverse)
 		return func(dir string) (entries fs.DirEntries, err error) {
-			dirCtx := filter.SetUseFilter(m.Ctx, !includeAll) // make filter-aware backends constrain List
+			dirCtx := filter.SetUseFilter(m.Ctx, f.Features().FilterAware && !includeAll) // make filter-aware backends constrain List
 			return list.DirSorted(dirCtx, f, includeAll, dir)
 		}
 	}
@@ -100,7 +103,7 @@ func (m *March) makeListDir(ctx context.Context, f fs.Fs, includeAll bool) listD
 		mu.Lock()
 		defer mu.Unlock()
 		if !started {
-			dirCtx := filter.SetUseFilter(m.Ctx, !includeAll) // make filter-aware backends constrain List
+			dirCtx := filter.SetUseFilter(m.Ctx, f.Features().FilterAware && !includeAll) // make filter-aware backends constrain List
 			dirs, dirsErr = walk.NewDirTree(dirCtx, f, m.Dir, includeAll, ci.MaxDepth)
 			started = true
 		}
@@ -412,7 +415,7 @@ func (m *March) processJob(job listDirJob) ([]listDirJob, error) {
 		} else {
 			fs.Errorf(m.Fsrc, "error reading source root directory: %v", srcListErr)
 		}
-		srcListErr = fs.CountError(srcListErr)
+		srcListErr = fs.CountError(m.Ctx, srcListErr)
 		return nil, srcListErr
 	}
 	if dstListErr == fs.ErrorDirNotFound {
@@ -423,19 +426,17 @@ func (m *March) processJob(job listDirJob) ([]listDirJob, error) {
 		} else {
 			fs.Errorf(m.Fdst, "error reading destination root directory: %v", dstListErr)
 		}
-		dstListErr = fs.CountError(dstListErr)
+		dstListErr = fs.CountError(m.Ctx, dstListErr)
 		return nil, dstListErr
 	}
 
 	// If NoTraverse is set, then try to find a matching object
 	// for each item in the srcList to head dst object
-	ci := fs.GetConfig(m.Ctx)
-	limiter := make(chan struct{}, ci.Checkers)
 	if m.NoTraverse && !m.NoCheckDest {
 		for _, src := range srcList {
 			wg.Add(1)
-			limiter <- struct{}{}
-			go func(limiter chan struct{}, src fs.DirEntry) {
+			m.limiter <- struct{}{}
+			go func(src fs.DirEntry) {
 				defer wg.Done()
 				if srcObj, ok := src.(fs.Object); ok {
 					leaf := path.Base(srcObj.Remote())
@@ -446,8 +447,8 @@ func (m *March) processJob(job listDirJob) ([]listDirJob, error) {
 						mu.Unlock()
 					}
 				}
-				<-limiter
-			}(limiter, src)
+				<-m.limiter
+			}(src)
 		}
 		wg.Wait()
 	}

@@ -13,19 +13,32 @@ import (
 // Features describe the optional features of the Fs
 type Features struct {
 	// Feature flags, whether Fs
-	CaseInsensitive         bool // has case insensitive files
-	DuplicateFiles          bool // allows duplicate files
-	ReadMimeType            bool // can read the mime type of objects
-	WriteMimeType           bool // can set the mime type of objects
-	CanHaveEmptyDirectories bool // can have empty directories
-	BucketBased             bool // is bucket based (like s3, swift, etc.)
-	BucketBasedRootOK       bool // is bucket based and can use from root
-	SetTier                 bool // allows set tier functionality on objects
-	GetTier                 bool // allows to retrieve storage tier of objects
-	ServerSideAcrossConfigs bool // can server-side copy between different remotes of the same type
-	IsLocal                 bool // is the local backend
-	SlowModTime             bool // if calling ModTime() generally takes an extra transaction
-	SlowHash                bool // if calling Hash() generally takes an extra transaction
+	CaseInsensitive          bool // has case insensitive files
+	DuplicateFiles           bool // allows duplicate files
+	ReadMimeType             bool // can read the mime type of objects
+	WriteMimeType            bool // can set the mime type of objects
+	CanHaveEmptyDirectories  bool // can have empty directories
+	BucketBased              bool // is bucket based (like s3, swift, etc.)
+	BucketBasedRootOK        bool // is bucket based and can use from root
+	SetTier                  bool // allows set tier functionality on objects
+	GetTier                  bool // allows to retrieve storage tier of objects
+	ServerSideAcrossConfigs  bool // can server-side copy between different remotes of the same type
+	IsLocal                  bool // is the local backend
+	SlowModTime              bool // if calling ModTime() generally takes an extra transaction
+	SlowHash                 bool // if calling Hash() generally takes an extra transaction
+	ReadMetadata             bool // can read metadata from objects
+	WriteMetadata            bool // can write metadata to objects
+	UserMetadata             bool // can read/write general purpose metadata
+	ReadDirMetadata          bool // can read metadata from directories (implements Directory.Metadata)
+	WriteDirMetadata         bool // can write metadata to directories (implements Directory.SetMetadata)
+	WriteDirSetModTime       bool // can write metadata to directories (implements Directory.SetModTime)
+	UserDirMetadata          bool // can read/write general purpose metadata to/from directories
+	DirModTimeUpdatesOnWrite bool // indicate writing files to a directory updates its modtime
+	FilterAware              bool // can make use of filters if provided for listing
+	PartialUploads           bool // uploaded file can appear incomplete on the fs while it's being uploaded
+	NoMultiThreading         bool // set if can't have multiplethreads on one download open
+	Overlay                  bool // this wraps one or more backends to add functionality
+	ChunkWriterDoesntSeek    bool // set if the chunk writer doesn't need to read the data more than once
 
 	// Purge all files in the directory specified
 	//
@@ -66,6 +79,15 @@ type Features struct {
 	//
 	// If destination exists then return fs.ErrorDirExists
 	DirMove func(ctx context.Context, src Fs, srcRemote, dstRemote string) error
+
+	// MkdirMetadata makes the directory passed in as dir.
+	//
+	// It shouldn't return an error if it already exists.
+	//
+	// If the metadata is not nil it is set.
+	//
+	// It returns the directory that was created.
+	MkdirMetadata func(ctx context.Context, dir string, metadata Metadata) (Directory, error)
 
 	// ChangeNotify calls the passed function with a path
 	// that has had changes. If the implementation
@@ -109,6 +131,9 @@ type Features struct {
 	// in into the first one and rmdirs the other directories.
 	MergeDirs func(ctx context.Context, dirs []Directory) error
 
+	// DirSetModTime sets the metadata on the directory to set the modification date
+	DirSetModTime func(ctx context.Context, dir string, modTime time.Time) error
+
 	// CleanUp the trash in the Fs
 	//
 	// Implement this if you have a way of emptying the trash or
@@ -143,6 +168,13 @@ type Features struct {
 	// It truncates any existing object
 	OpenWriterAt func(ctx context.Context, remote string, size int64) (WriterAtCloser, error)
 
+	// OpenChunkWriter returns the chunk size and a ChunkWriter
+	//
+	// Pass in the remote and the src object
+	// You can also use options to hint at the desired chunk size
+	//
+	OpenChunkWriter func(ctx context.Context, remote string, src ObjectInfo, options ...OpenOption) (info ChunkWriterInfo, writer ChunkWriter, err error)
+
 	// UserInfo returns info about the connected user
 	UserInfo func(ctx context.Context) (map[string]string, error)
 
@@ -168,6 +200,12 @@ type Features struct {
 // Disable nil's out the named feature.  If it isn't found then it
 // will log a message.
 func (ft *Features) Disable(name string) *Features {
+	// Prefix boolean values with ! to set the feature
+	invert := false
+	if strings.HasPrefix(name, "!") {
+		name = name[1:]
+		invert = true
+	}
 	v := reflect.ValueOf(ft).Elem()
 	vType := v.Type()
 	for i := 0; i < v.NumField(); i++ {
@@ -177,9 +215,18 @@ func (ft *Features) Disable(name string) *Features {
 			if !field.CanSet() {
 				Errorf(nil, "Can't set Feature %q", name)
 			} else {
-				zero := reflect.Zero(field.Type())
-				field.Set(zero)
-				Debugf(nil, "Reset feature %q", name)
+				if invert {
+					if field.Type().Kind() == reflect.Bool {
+						field.Set(reflect.ValueOf(true))
+						Debugf(nil, "Set feature %q", name)
+					} else {
+						Errorf(nil, "Can't set Feature %q to true", name)
+					}
+				} else {
+					zero := reflect.Zero(field.Type())
+					field.Set(zero)
+					Debugf(nil, "Reset feature %q", name)
+				}
 			}
 		}
 	}
@@ -241,6 +288,9 @@ func (ft *Features) Fill(ctx context.Context, f Fs) *Features {
 	if do, ok := f.(DirMover); ok {
 		ft.DirMove = do.DirMove
 	}
+	if do, ok := f.(MkdirMetadataer); ok {
+		ft.MkdirMetadata = do.MkdirMetadata
+	}
 	if do, ok := f.(ChangeNotifier); ok {
 		ft.ChangeNotify = do.ChangeNotify
 	}
@@ -250,6 +300,7 @@ func (ft *Features) Fill(ctx context.Context, f Fs) *Features {
 	if do, ok := f.(Wrapper); ok {
 		ft.WrapFs = do.WrapFs
 		ft.SetWrapper = do.SetWrapper
+		ft.Overlay = true // if implement UnWrap then must be an Overlay
 	}
 	if do, ok := f.(DirCacheFlusher); ok {
 		ft.DirCacheFlush = do.DirCacheFlush
@@ -266,6 +317,9 @@ func (ft *Features) Fill(ctx context.Context, f Fs) *Features {
 	if do, ok := f.(MergeDirser); ok {
 		ft.MergeDirs = do.MergeDirs
 	}
+	if do, ok := f.(DirSetModTimer); ok {
+		ft.DirSetModTime = do.DirSetModTime
+	}
 	if do, ok := f.(CleanUpper); ok {
 		ft.CleanUp = do.CleanUp
 	}
@@ -277,6 +331,9 @@ func (ft *Features) Fill(ctx context.Context, f Fs) *Features {
 	}
 	if do, ok := f.(OpenWriterAter); ok {
 		ft.OpenWriterAt = do.OpenWriterAt
+	}
+	if do, ok := f.(OpenChunkWriter); ok {
+		ft.OpenChunkWriter = do.OpenChunkWriter
 	}
 	if do, ok := f.(UserInfoer); ok {
 		ft.UserInfo = do.UserInfo
@@ -305,6 +362,14 @@ func (ft *Features) Mask(ctx context.Context, f Fs) *Features {
 	ft.DuplicateFiles = ft.DuplicateFiles && mask.DuplicateFiles
 	ft.ReadMimeType = ft.ReadMimeType && mask.ReadMimeType
 	ft.WriteMimeType = ft.WriteMimeType && mask.WriteMimeType
+	ft.ReadMetadata = ft.ReadMetadata && mask.ReadMetadata
+	ft.WriteMetadata = ft.WriteMetadata && mask.WriteMetadata
+	ft.UserMetadata = ft.UserMetadata && mask.UserMetadata
+	ft.ReadDirMetadata = ft.ReadDirMetadata && mask.ReadDirMetadata
+	ft.WriteDirMetadata = ft.WriteDirMetadata && mask.WriteDirMetadata
+	ft.WriteDirSetModTime = ft.WriteDirSetModTime && mask.WriteDirSetModTime
+	ft.UserDirMetadata = ft.UserDirMetadata && mask.UserDirMetadata
+	ft.DirModTimeUpdatesOnWrite = ft.DirModTimeUpdatesOnWrite && mask.DirModTimeUpdatesOnWrite
 	ft.CanHaveEmptyDirectories = ft.CanHaveEmptyDirectories && mask.CanHaveEmptyDirectories
 	ft.BucketBased = ft.BucketBased && mask.BucketBased
 	ft.BucketBasedRootOK = ft.BucketBasedRootOK && mask.BucketBasedRootOK
@@ -314,6 +379,10 @@ func (ft *Features) Mask(ctx context.Context, f Fs) *Features {
 	// ft.IsLocal = ft.IsLocal && mask.IsLocal Don't propagate IsLocal
 	ft.SlowModTime = ft.SlowModTime && mask.SlowModTime
 	ft.SlowHash = ft.SlowHash && mask.SlowHash
+	ft.FilterAware = ft.FilterAware && mask.FilterAware
+	ft.PartialUploads = ft.PartialUploads && mask.PartialUploads
+	ft.NoMultiThreading = ft.NoMultiThreading && mask.NoMultiThreading
+	// ft.Overlay = ft.Overlay && mask.Overlay don't propagate Overlay
 
 	if mask.Purge == nil {
 		ft.Purge = nil
@@ -326,6 +395,9 @@ func (ft *Features) Mask(ctx context.Context, f Fs) *Features {
 	}
 	if mask.DirMove == nil {
 		ft.DirMove = nil
+	}
+	if mask.MkdirMetadata == nil {
+		ft.MkdirMetadata = nil
 	}
 	if mask.ChangeNotify == nil {
 		ft.ChangeNotify = nil
@@ -351,6 +423,9 @@ func (ft *Features) Mask(ctx context.Context, f Fs) *Features {
 	if mask.MergeDirs == nil {
 		ft.MergeDirs = nil
 	}
+	if mask.DirSetModTime == nil {
+		ft.DirSetModTime = nil
+	}
 	if mask.CleanUp == nil {
 		ft.CleanUp = nil
 	}
@@ -362,6 +437,9 @@ func (ft *Features) Mask(ctx context.Context, f Fs) *Features {
 	}
 	if mask.OpenWriterAt == nil {
 		ft.OpenWriterAt = nil
+	}
+	if mask.OpenChunkWriter == nil {
+		ft.OpenChunkWriter = nil
 	}
 	if mask.UserInfo == nil {
 		ft.UserInfo = nil
@@ -452,6 +530,18 @@ type DirMover interface {
 	DirMove(ctx context.Context, src Fs, srcRemote, dstRemote string) error
 }
 
+// MkdirMetadataer is an optional interface for Fs
+type MkdirMetadataer interface {
+	// MkdirMetadata makes the directory passed in as dir.
+	//
+	// It shouldn't return an error if it already exists.
+	//
+	// If the metadata is not nil it is set.
+	//
+	// It returns the directory that was created.
+	MkdirMetadata(ctx context.Context, dir string, metadata Metadata) (Directory, error)
+}
+
 // ChangeNotifier is an optional interface for Fs
 type ChangeNotifier interface {
 	// ChangeNotify calls the passed function with a path
@@ -534,6 +624,12 @@ type MergeDirser interface {
 	MergeDirs(ctx context.Context, dirs []Directory) error
 }
 
+// DirSetModTimer is an optional interface for Fs
+type DirSetModTimer interface {
+	// DirSetModTime sets the metadata on the directory to set the modification date
+	DirSetModTime(ctx context.Context, dir string, modTime time.Time) error
+}
+
 // CleanUpper is an optional interfaces for Fs
 type CleanUpper interface {
 	// CleanUp the trash in the Fs
@@ -591,6 +687,42 @@ type OpenWriterAter interface {
 	//
 	// It truncates any existing object
 	OpenWriterAt(ctx context.Context, remote string, size int64) (WriterAtCloser, error)
+}
+
+// OpenWriterAtFn describes the OpenWriterAt function pointer
+type OpenWriterAtFn func(ctx context.Context, remote string, size int64) (WriterAtCloser, error)
+
+// ChunkWriterInfo describes how a backend would like ChunkWriter called
+type ChunkWriterInfo struct {
+	ChunkSize         int64 // preferred chunk size
+	Concurrency       int   // how many chunks to write at once
+	LeavePartsOnError bool  // if set don't delete parts uploaded so far on error
+}
+
+// OpenChunkWriter is an option interface for Fs to implement chunked writing
+type OpenChunkWriter interface {
+	// OpenChunkWriter returns the chunk size and a ChunkWriter
+	//
+	// Pass in the remote and the src object
+	// You can also use options to hint at the desired chunk size
+	OpenChunkWriter(ctx context.Context, remote string, src ObjectInfo, options ...OpenOption) (info ChunkWriterInfo, writer ChunkWriter, err error)
+}
+
+// OpenChunkWriterFn describes the OpenChunkWriter function pointer
+type OpenChunkWriterFn func(ctx context.Context, remote string, src ObjectInfo, options ...OpenOption) (info ChunkWriterInfo, writer ChunkWriter, err error)
+
+// ChunkWriter is returned by OpenChunkWriter to implement chunked writing
+type ChunkWriter interface {
+	// WriteChunk will write chunk number with reader bytes, where chunk number >= 0
+	WriteChunk(ctx context.Context, chunkNumber int, reader io.ReadSeeker) (bytesWritten int64, err error)
+
+	// Close complete chunked writer finalising the file.
+	Close(ctx context.Context) error
+
+	// Abort chunk write
+	//
+	// You can and should call Abort without calling Close.
+	Abort(ctx context.Context) error
 }
 
 // UserInfoer is an optional interface for Fs

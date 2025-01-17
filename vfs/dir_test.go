@@ -7,6 +7,7 @@ import (
 	"sort"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/operations"
@@ -15,8 +16,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func dirCreate(t *testing.T) (r *fstest.Run, vfs *VFS, dir *Dir, item fstest.Item, cleanup func()) {
-	r, vfs, cleanup = newTestVFS(t)
+func dirCreate(t *testing.T) (r *fstest.Run, vfs *VFS, dir *Dir, item fstest.Item) {
+	r, vfs = newTestVFS(t)
 
 	file1 := r.WriteObject(context.Background(), "dir/file1", "file1 contents", t1)
 	r.CheckRemoteItems(t, file1)
@@ -25,12 +26,11 @@ func dirCreate(t *testing.T) (r *fstest.Run, vfs *VFS, dir *Dir, item fstest.Ite
 	require.NoError(t, err)
 	require.True(t, node.IsDir())
 
-	return r, vfs, node.(*Dir), file1, cleanup
+	return r, vfs, node.(*Dir), file1
 }
 
 func TestDirMethods(t *testing.T) {
-	_, vfs, dir, _, cleanup := dirCreate(t)
-	defer cleanup()
+	_, vfs, dir, _ := dirCreate(t)
 
 	// String
 	assert.Equal(t, "dir/", dir.String())
@@ -43,7 +43,7 @@ func TestDirMethods(t *testing.T) {
 	assert.Equal(t, false, dir.IsFile())
 
 	// Mode
-	assert.Equal(t, vfs.Opt.DirPerms, dir.Mode())
+	assert.Equal(t, os.FileMode(vfs.Opt.DirPerms), dir.Mode())
 
 	// Name
 	assert.Equal(t, "dir", dir.Name())
@@ -81,8 +81,7 @@ func TestDirMethods(t *testing.T) {
 }
 
 func TestDirForgetAll(t *testing.T) {
-	_, vfs, dir, file1, cleanup := dirCreate(t)
-	defer cleanup()
+	_, vfs, dir, file1 := dirCreate(t)
 
 	// Make sure / and dir are in cache
 	_, err := vfs.Stat(file1.Path)
@@ -109,8 +108,7 @@ func TestDirForgetAll(t *testing.T) {
 }
 
 func TestDirForgetPath(t *testing.T) {
-	_, vfs, dir, file1, cleanup := dirCreate(t)
-	defer cleanup()
+	_, vfs, dir, file1 := dirCreate(t)
 
 	// Make sure / and dir are in cache
 	_, err := vfs.Stat(file1.Path)
@@ -141,8 +139,7 @@ func TestDirForgetPath(t *testing.T) {
 }
 
 func TestDirWalk(t *testing.T) {
-	r, vfs, _, file1, cleanup := dirCreate(t)
-	defer cleanup()
+	r, vfs, _, file1 := dirCreate(t)
 
 	file2 := r.WriteObject(context.Background(), "fil/a/b/c", "super long file", t1)
 	r.CheckRemoteItems(t, file1, file2)
@@ -210,8 +207,7 @@ func TestDirWalk(t *testing.T) {
 }
 
 func TestDirSetModTime(t *testing.T) {
-	_, vfs, dir, _, cleanup := dirCreate(t)
-	defer cleanup()
+	_, vfs, dir, _ := dirCreate(t)
 
 	err := dir.SetModTime(t1)
 	require.NoError(t, err)
@@ -227,8 +223,7 @@ func TestDirSetModTime(t *testing.T) {
 }
 
 func TestDirStat(t *testing.T) {
-	_, _, dir, _, cleanup := dirCreate(t)
-	defer cleanup()
+	_, _, dir, _ := dirCreate(t)
 
 	node, err := dir.Stat("file1")
 	require.NoError(t, err)
@@ -253,8 +248,7 @@ func checkListing(t *testing.T, dir *Dir, want []string) {
 }
 
 func TestDirReadDirAll(t *testing.T) {
-	r, vfs, cleanup := newTestVFS(t)
-	defer cleanup()
+	r, vfs := newTestVFS(t)
 
 	file1 := r.WriteObject(context.Background(), "dir/file1", "file1 contents", t1)
 	file2 := r.WriteObject(context.Background(), "dir/file2", "file2- contents", t2)
@@ -334,8 +328,7 @@ func TestDirReadDirAll(t *testing.T) {
 }
 
 func TestDirOpen(t *testing.T) {
-	_, _, dir, _, cleanup := dirCreate(t)
-	defer cleanup()
+	_, _, dir, _ := dirCreate(t)
 
 	fd, err := dir.Open(os.O_RDONLY)
 	require.NoError(t, err)
@@ -348,12 +341,14 @@ func TestDirOpen(t *testing.T) {
 }
 
 func TestDirCreate(t *testing.T) {
-	_, vfs, dir, _, cleanup := dirCreate(t)
-	defer cleanup()
+	_, vfs, dir, _ := dirCreate(t)
 
+	origModTime := dir.ModTime()
+	time.Sleep(100 * time.Millisecond) // for low rez Windows timers
 	file, err := dir.Create("potato", os.O_WRONLY|os.O_CREATE)
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), file.Size())
+	assert.True(t, dir.ModTime().After(origModTime))
 
 	fd, err := file.Open(os.O_WRONLY | os.O_CREATE)
 	require.NoError(t, err)
@@ -388,14 +383,16 @@ func TestDirCreate(t *testing.T) {
 }
 
 func TestDirMkdir(t *testing.T) {
-	r, vfs, dir, file1, cleanup := dirCreate(t)
-	defer cleanup()
+	r, vfs, dir, file1 := dirCreate(t)
 
 	_, err := dir.Mkdir("file1")
 	assert.Error(t, err)
 
+	origModTime := dir.ModTime()
+	time.Sleep(100 * time.Millisecond) // for low rez Windows timers
 	sub, err := dir.Mkdir("sub")
 	assert.NoError(t, err)
+	assert.True(t, dir.ModTime().After(origModTime))
 
 	// check the vfs
 	checkListing(t, dir, []string{"file1,14,false", "sub,0,true"})
@@ -410,8 +407,7 @@ func TestDirMkdir(t *testing.T) {
 }
 
 func TestDirMkdirSub(t *testing.T) {
-	r, vfs, dir, file1, cleanup := dirCreate(t)
-	defer cleanup()
+	r, vfs, dir, file1 := dirCreate(t)
 
 	_, err := dir.Mkdir("file1")
 	assert.Error(t, err)
@@ -436,8 +432,7 @@ func TestDirMkdirSub(t *testing.T) {
 }
 
 func TestDirRemove(t *testing.T) {
-	r, vfs, dir, _, cleanup := dirCreate(t)
-	defer cleanup()
+	r, vfs, dir, _ := dirCreate(t)
 
 	// check directory is there
 	node, err := vfs.Stat("dir")
@@ -476,8 +471,7 @@ func TestDirRemove(t *testing.T) {
 }
 
 func TestDirRemoveAll(t *testing.T) {
-	r, vfs, dir, _, cleanup := dirCreate(t)
-	defer cleanup()
+	r, vfs, dir, _ := dirCreate(t)
 
 	// Remove the directory and contents
 	err := dir.RemoveAll()
@@ -498,11 +492,13 @@ func TestDirRemoveAll(t *testing.T) {
 }
 
 func TestDirRemoveName(t *testing.T) {
-	r, vfs, dir, _, cleanup := dirCreate(t)
-	defer cleanup()
+	r, vfs, dir, _ := dirCreate(t)
 
+	origModTime := dir.ModTime()
+	time.Sleep(100 * time.Millisecond) // for low rez Windows timers
 	err := dir.RemoveName("file1")
 	require.NoError(t, err)
+	assert.True(t, dir.ModTime().After(origModTime))
 	checkListing(t, dir, []string(nil))
 	root, err := vfs.Root()
 	require.NoError(t, err)
@@ -518,8 +514,7 @@ func TestDirRemoveName(t *testing.T) {
 }
 
 func TestDirRename(t *testing.T) {
-	r, vfs, dir, file1, cleanup := dirCreate(t)
-	defer cleanup()
+	r, vfs, dir, file1 := dirCreate(t)
 
 	features := r.Fremote.Features()
 	if features.DirMove == nil && features.Move == nil && features.Copy == nil {
@@ -552,8 +547,11 @@ func TestDirRename(t *testing.T) {
 	dir = node.(*Dir)
 
 	// Rename a file
+	origModTime := dir.ModTime()
+	time.Sleep(100 * time.Millisecond) // for low rez Windows timers
 	err = dir.Rename("file1", "file2", root)
 	assert.NoError(t, err)
+	assert.True(t, dir.ModTime().After(origModTime))
 	checkListing(t, root, []string{"dir2,0,true", "file2,14,false"})
 	checkListing(t, dir, []string{"file3,15,false"})
 
@@ -591,4 +589,69 @@ func TestDirRename(t *testing.T) {
 	vfs.Opt.ReadOnly = true
 	err = dir.Rename("potato", "tuba", dir)
 	assert.Equal(t, EROFS, err)
+
+	// Rename a dir, check that key was correctly renamed in dir.parent.items
+	vfs.Opt.ReadOnly = false
+	_, ok := dir.parent.items["dir2"]
+	assert.True(t, ok, "dir.parent.items should have 'dir2' key before rename")
+	_, ok = dir.parent.items["dir3"]
+	assert.False(t, ok, "dir.parent.items should not have 'dir3' key before rename")
+	dir.renameTree("dir3") // rename dir2 to dir3
+	_, ok = dir.parent.items["dir2"]
+	assert.False(t, ok, "dir.parent.items should not have 'dir2' key after rename")
+	d, ok := dir.parent.items["dir3"]
+	assert.True(t, ok, fmt.Sprintf("expected to find 'dir3' key in dir.parent.items after rename, got %v", dir.parent.items))
+	assert.Equal(t, dir, d, `expected renamed dir to match value of dir.parent.items["dir3"]`)
+}
+
+func TestDirStructSize(t *testing.T) {
+	t.Logf("Dir struct has size %d bytes", unsafe.Sizeof(Dir{}))
+}
+
+// Check that open files appear in the directory listing properly after a forget
+func TestDirFileOpen(t *testing.T) {
+	_, vfs, dir, _ := dirCreate(t)
+
+	assert.False(t, dir.hasVirtual())
+	assert.False(t, dir.parent.hasVirtual())
+
+	_, err := dir.Mkdir("sub")
+	require.NoError(t, err)
+
+	assert.True(t, dir.hasVirtual())
+	assert.True(t, dir.parent.hasVirtual())
+
+	fd0, err := vfs.Create("dir/sub/file0")
+	require.NoError(t, err)
+	_, err = fd0.Write([]byte("hello"))
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, fd0.Close())
+	}()
+
+	fd2, err := vfs.Create("dir/sub/file2")
+	require.NoError(t, err)
+	_, err = fd2.Write([]byte("hello world!"))
+	require.NoError(t, err)
+	require.NoError(t, fd2.Close())
+	assert.True(t, dir.hasVirtual())
+
+	assert.True(t, dir.hasVirtual())
+	assert.True(t, dir.parent.hasVirtual())
+
+	// Now forget the directory
+	hasVirtual := dir.parent.ForgetAll()
+	assert.True(t, hasVirtual)
+
+	assert.True(t, dir.hasVirtual())
+	assert.True(t, dir.parent.hasVirtual())
+
+	// Check the files can still be found
+	fi, err := vfs.Stat("dir/sub/file0")
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), fi.Size())
+
+	fi, err = vfs.Stat("dir/sub/file2")
+	require.NoError(t, err)
+	assert.Equal(t, int64(12), fi.Size())
 }

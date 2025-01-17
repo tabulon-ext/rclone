@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"sync"
@@ -24,8 +23,8 @@ import (
 
 var zeroes = string(make([]byte, 100))
 
-func newItemTestCache(t *testing.T) (r *fstest.Run, c *Cache, cleanup func()) {
-	opt := vfscommon.DefaultOpt
+func newItemTestCache(t *testing.T) (r *fstest.Run, c *Cache) {
+	opt := vfscommon.Opt
 
 	// Disable the cache cleaner as it interferes with these tests
 	opt.CachePollInterval = 0
@@ -42,7 +41,7 @@ func checkObject(t *testing.T, r *fstest.Run, remote string, contents string) {
 	require.NoError(t, err)
 	in, err := obj.Open(context.Background())
 	require.NoError(t, err)
-	buf, err := ioutil.ReadAll(in)
+	buf, err := io.ReadAll(in)
 	require.NoError(t, err)
 	require.NoError(t, in.Close())
 	assert.Equal(t, contents, string(buf))
@@ -62,8 +61,7 @@ func newFile(t *testing.T, r *fstest.Run, c *Cache, remote string) (contents str
 }
 
 func TestItemExists(t *testing.T) {
-	_, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	_, c := newItemTestCache(t)
 	item, _ := c.get("potato")
 
 	assert.False(t, item.Exists())
@@ -76,8 +74,7 @@ func TestItemExists(t *testing.T) {
 }
 
 func TestItemGetSize(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 	item, _ := c.get("potato")
 	require.NoError(t, item.Open(nil))
 
@@ -98,8 +95,7 @@ func TestItemGetSize(t *testing.T) {
 }
 
 func TestItemDirty(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 	item, _ := c.get("potato")
 	require.NoError(t, item.Open(nil))
 
@@ -123,8 +119,7 @@ func TestItemDirty(t *testing.T) {
 }
 
 func TestItemSync(t *testing.T) {
-	_, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	_, c := newItemTestCache(t)
 	item, _ := c.get("potato")
 
 	require.Error(t, item.Sync())
@@ -137,8 +132,7 @@ func TestItemSync(t *testing.T) {
 }
 
 func TestItemTruncateNew(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 	item, _ := c.get("potato")
 
 	require.Error(t, item.Truncate(0))
@@ -165,8 +159,7 @@ func TestItemTruncateNew(t *testing.T) {
 }
 
 func TestItemTruncateExisting(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 
 	contents, obj, item := newFile(t, r, c, "existing")
 
@@ -185,8 +178,7 @@ func TestItemTruncateExisting(t *testing.T) {
 }
 
 func TestItemReadAt(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 
 	contents, obj, item := newFile(t, r, c, "existing")
 	buf := make([]byte, 10)
@@ -220,8 +212,7 @@ func TestItemReadAt(t *testing.T) {
 }
 
 func TestItemWriteAtNew(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 	item, _ := c.get("potato")
 	buf := make([]byte, 10)
 
@@ -252,8 +243,7 @@ func TestItemWriteAtNew(t *testing.T) {
 }
 
 func TestItemWriteAtExisting(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 
 	contents, obj, item := newFile(t, r, c, "existing")
 
@@ -277,8 +267,7 @@ func TestItemWriteAtExisting(t *testing.T) {
 }
 
 func TestItemLoadMeta(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 
 	contents, obj, item := newFile(t, r, c, "existing")
 	_ = contents
@@ -306,8 +295,7 @@ func TestItemLoadMeta(t *testing.T) {
 }
 
 func TestItemReload(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 
 	contents, obj, item := newFile(t, r, c, "existing")
 	_ = contents
@@ -351,8 +339,7 @@ func TestItemReload(t *testing.T) {
 }
 
 func TestItemReloadRemoteGone(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 
 	contents, obj, item := newFile(t, r, c, "existing")
 	_ = contents
@@ -395,8 +382,7 @@ func TestItemReloadRemoteGone(t *testing.T) {
 }
 
 func TestItemReloadCacheStale(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 
 	contents, obj, item := newFile(t, r, c, "existing")
 
@@ -423,7 +409,13 @@ func TestItemReloadCacheStale(t *testing.T) {
 	assert.NotEqual(t, contents, contents2)
 
 	// Re-open with updated object
+	oldFingerprint := item.info.Fingerprint
+	assert.NotEqual(t, "", oldFingerprint)
 	require.NoError(t, item.Open(obj))
+
+	// Make sure fingerprint was updated
+	assert.NotEqual(t, oldFingerprint, item.info.Fingerprint)
+	assert.NotEqual(t, "", item.info.Fingerprint)
 
 	// Check size is now 110
 	size, err = item.GetSize()
@@ -436,7 +428,7 @@ func TestItemReloadCacheStale(t *testing.T) {
 	assert.Equal(t, int64(110), fi.Size())
 
 	// Write to the file to make it dirty
-	// This checks we aren't re-using stale data
+	// This checks we aren't reusing stale data
 	n, err := item.WriteAt([]byte("HELLO"), 0)
 	require.NoError(t, err)
 	assert.Equal(t, 5, n)
@@ -451,8 +443,7 @@ func TestItemReloadCacheStale(t *testing.T) {
 }
 
 func TestItemReadWrite(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 	const (
 		size     = 50*1024*1024 + 123
 		fileName = "large"

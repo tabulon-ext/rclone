@@ -35,10 +35,13 @@ func TestIntegration(t *testing.T) {
 			"MimeType",
 			"GetTier",
 			"SetTier",
+			"Metadata",
+			"SetMetadata",
 		},
 		UnimplementableFsMethods: []string{
 			"PublicLink",
 			"OpenWriterAt",
+			"OpenChunkWriter",
 			"MergeDirs",
 			"DirCacheFlush",
 			"UserInfo",
@@ -53,6 +56,7 @@ func TestIntegration(t *testing.T) {
 			{Name: name, Key: "type", Value: "chunker"},
 			{Name: name, Key: "remote", Value: tempDir},
 		}
+		opt.QuickTestOK = true
 	}
 	fstests.Run(t, &opt)
 }

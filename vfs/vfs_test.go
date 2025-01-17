@@ -28,8 +28,8 @@ var (
 
 // Constants uses in the tests
 const (
-	writeBackDelay      = 100 * time.Millisecond // A short writeback delay for testing
-	waitForWritersDelay = 30 * time.Second       // time to wait for existing writers
+	writeBackDelay      = fs.Duration(100 * time.Millisecond) // A short writeback delay for testing
+	waitForWritersDelay = 30 * time.Second                    // time to wait for existing writers
 )
 
 // TestMain drives the tests
@@ -46,18 +46,17 @@ func cleanupVFS(t *testing.T, vfs *VFS) {
 }
 
 // Create a new VFS
-func newTestVFSOpt(t *testing.T, opt *vfscommon.Options) (r *fstest.Run, vfs *VFS, cleanup func()) {
+func newTestVFSOpt(t *testing.T, opt *vfscommon.Options) (r *fstest.Run, vfs *VFS) {
 	r = fstest.NewRun(t)
 	vfs = New(r.Fremote, opt)
-	cleanup = func() {
+	t.Cleanup(func() {
 		cleanupVFS(t, vfs)
-		r.Finalise()
-	}
-	return r, vfs, cleanup
+	})
+	return r, vfs
 }
 
 // Create a new VFS with default options
-func newTestVFS(t *testing.T) (r *fstest.Run, vfs *VFS, cleanup func()) {
+func newTestVFS(t *testing.T) (r *fstest.Run, vfs *VFS) {
 	return newTestVFSOpt(t, nil)
 }
 
@@ -126,7 +125,7 @@ func TestVFSbaseHandle(t *testing.T) {
 	assert.Nil(t, node)
 }
 
-// TestNew sees if the New command works properly
+// TestVFSNew sees if the New command works properly
 func TestVFSNew(t *testing.T) {
 	// Check active cache has this many entries
 	checkActiveCacheEntries := func(i int) {
@@ -136,13 +135,11 @@ func TestVFSNew(t *testing.T) {
 
 	checkActiveCacheEntries(0)
 
-	r, vfs, cleanup := newTestVFS(t)
+	r, vfs := newTestVFS(t)
 
 	// Check making a VFS with nil options
-	var defaultOpt = vfscommon.DefaultOpt
-	defaultOpt.DirPerms |= os.ModeDir
-	assert.Equal(t, vfs.Opt, defaultOpt)
-	assert.Equal(t, vfs.f, r.Fremote)
+	var defaultOpt = vfscommon.Opt
+	defaultOpt.Init()
 
 	checkActiveCacheEntries(1)
 
@@ -158,39 +155,36 @@ func TestVFSNew(t *testing.T) {
 
 	checkActiveCacheEntries(1)
 
-	cleanup()
+	cleanupVFS(t, vfs)
 
 	checkActiveCacheEntries(0)
 }
 
-// TestNew sees if the New command works properly
+// TestVFSNewWithOpts sees if the New command works properly
 func TestVFSNewWithOpts(t *testing.T) {
-	var opt = vfscommon.DefaultOpt
+	var opt = vfscommon.Opt
 	opt.DirPerms = 0777
 	opt.FilePerms = 0666
 	opt.Umask = 0002
-	_, vfs, cleanup := newTestVFSOpt(t, &opt)
-	defer cleanup()
+	_, vfs := newTestVFSOpt(t, &opt)
 
-	assert.Equal(t, os.FileMode(0775)|os.ModeDir, vfs.Opt.DirPerms)
-	assert.Equal(t, os.FileMode(0664), vfs.Opt.FilePerms)
+	assert.Equal(t, vfscommon.FileMode(0775)|vfscommon.FileMode(os.ModeDir), vfs.Opt.DirPerms)
+	assert.Equal(t, vfscommon.FileMode(0664), vfs.Opt.FilePerms)
 }
 
-// TestRoot checks root directory is present and correct
+// TestVFSRoot checks root directory is present and correct
 func TestVFSRoot(t *testing.T) {
-	_, vfs, cleanup := newTestVFS(t)
-	defer cleanup()
+	_, vfs := newTestVFS(t)
 
 	root, err := vfs.Root()
 	require.NoError(t, err)
 	assert.Equal(t, vfs.root, root)
 	assert.True(t, root.IsDir())
-	assert.Equal(t, vfs.Opt.DirPerms.Perm(), root.Mode().Perm())
+	assert.Equal(t, os.FileMode(vfs.Opt.DirPerms).Perm(), root.Mode().Perm())
 }
 
 func TestVFSStat(t *testing.T) {
-	r, vfs, cleanup := newTestVFS(t)
-	defer cleanup()
+	r, vfs := newTestVFS(t)
 
 	file1 := r.WriteObject(context.Background(), "file1", "file1 contents", t1)
 	file2 := r.WriteObject(context.Background(), "dir/file2", "file2 contents", t2)
@@ -225,8 +219,7 @@ func TestVFSStat(t *testing.T) {
 }
 
 func TestVFSStatParent(t *testing.T) {
-	r, vfs, cleanup := newTestVFS(t)
-	defer cleanup()
+	r, vfs := newTestVFS(t)
 
 	file1 := r.WriteObject(context.Background(), "file1", "file1 contents", t1)
 	file2 := r.WriteObject(context.Background(), "dir/file2", "file2 contents", t2)
@@ -258,8 +251,7 @@ func TestVFSStatParent(t *testing.T) {
 }
 
 func TestVFSOpenFile(t *testing.T) {
-	r, vfs, cleanup := newTestVFS(t)
-	defer cleanup()
+	r, vfs := newTestVFS(t)
 
 	file1 := r.WriteObject(context.Background(), "file1", "file1 contents", t1)
 	file2 := r.WriteObject(context.Background(), "dir/file2", "file2 contents", t2)
@@ -293,8 +285,7 @@ func TestVFSOpenFile(t *testing.T) {
 }
 
 func TestVFSRename(t *testing.T) {
-	r, vfs, cleanup := newTestVFS(t)
-	defer cleanup()
+	r, vfs := newTestVFS(t)
 
 	features := r.Fremote.Features()
 	if features.Move == nil && features.Copy == nil {
@@ -322,8 +313,7 @@ func TestVFSRename(t *testing.T) {
 }
 
 func TestVFSStatfs(t *testing.T) {
-	r, vfs, cleanup := newTestVFS(t)
-	defer cleanup()
+	r, vfs := newTestVFS(t)
 
 	// pre-conditions
 	assert.Nil(t, vfs.usage)
@@ -370,6 +360,84 @@ func TestVFSStatfs(t *testing.T) {
 	assert.Equal(t, used, used2)
 	assert.Equal(t, free, free2)
 	assert.Equal(t, oldTime, vfs.usageTime)
+}
+
+func TestVFSMkdir(t *testing.T) {
+	r, vfs := newTestVFS(t)
+
+	if !r.Fremote.Features().CanHaveEmptyDirectories {
+		return // can't test if can't have empty directories
+	}
+
+	r.CheckRemoteListing(t, nil, []string{})
+
+	// Try making the root
+	err := vfs.Mkdir("", 0777)
+	require.NoError(t, err)
+	r.CheckRemoteListing(t, nil, []string{})
+
+	// Try making a sub directory
+	err = vfs.Mkdir("a", 0777)
+	require.NoError(t, err)
+
+	r.CheckRemoteListing(t, nil, []string{"a"})
+
+	// Try making an existing directory
+	err = vfs.Mkdir("a", 0777)
+	require.NoError(t, err)
+
+	r.CheckRemoteListing(t, nil, []string{"a"})
+
+	// Try making a new directory
+	err = vfs.Mkdir("b/", 0777)
+	require.NoError(t, err)
+
+	r.CheckRemoteListing(t, nil, []string{"a", "b"})
+
+	// Try making a new directory
+	err = vfs.Mkdir("/c", 0777)
+	require.NoError(t, err)
+
+	r.CheckRemoteListing(t, nil, []string{"a", "b", "c"})
+
+	// Try making a new directory
+	err = vfs.Mkdir("/d/", 0777)
+	require.NoError(t, err)
+
+	r.CheckRemoteListing(t, nil, []string{"a", "b", "c", "d"})
+}
+
+func TestVFSMkdirAll(t *testing.T) {
+	r, vfs := newTestVFS(t)
+
+	if !r.Fremote.Features().CanHaveEmptyDirectories {
+		return // can't test if can't have empty directories
+	}
+
+	r.CheckRemoteListing(t, nil, []string{})
+
+	// Try making the root
+	err := vfs.MkdirAll("", 0777)
+	require.NoError(t, err)
+	r.CheckRemoteListing(t, nil, []string{})
+
+	// Try making a sub directory
+	err = vfs.MkdirAll("a/b/c/d", 0777)
+	require.NoError(t, err)
+
+	r.CheckRemoteListing(t, nil, []string{"a", "a/b", "a/b/c", "a/b/c/d"})
+
+	// Try making an existing directory
+	err = vfs.MkdirAll("a/b/c", 0777)
+	require.NoError(t, err)
+
+	r.CheckRemoteListing(t, nil, []string{"a", "a/b", "a/b/c", "a/b/c/d"})
+
+	// Try making an existing directory
+	err = vfs.MkdirAll("/a/b/c/", 0777)
+	require.NoError(t, err)
+
+	r.CheckRemoteListing(t, nil, []string{"a", "a/b", "a/b/c", "a/b/c/d"})
 }
 
 func TestFillInMissingSizes(t *testing.T) {

@@ -35,6 +35,7 @@ import (
 	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/fs/fshttp"
 	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/fs/operations"
 	"github.com/rclone/rclone/lib/dircache"
 	"github.com/rclone/rclone/lib/encoder"
 	"github.com/rclone/rclone/lib/pacer"
@@ -132,42 +133,50 @@ func init() {
 			}
 			return nil, fmt.Errorf("unknown state %q", config.State)
 		}, Options: []fs.Option{{
-			Name: "app_id",
-			Help: "Sugarsync App ID.\n\nLeave blank to use rclone's.",
+			Name:      "app_id",
+			Help:      "Sugarsync App ID.\n\nLeave blank to use rclone's.",
+			Sensitive: true,
 		}, {
-			Name: "access_key_id",
-			Help: "Sugarsync Access Key ID.\n\nLeave blank to use rclone's.",
+			Name:      "access_key_id",
+			Help:      "Sugarsync Access Key ID.\n\nLeave blank to use rclone's.",
+			Sensitive: true,
 		}, {
-			Name: "private_access_key",
-			Help: "Sugarsync Private Access Key.\n\nLeave blank to use rclone's.",
+			Name:      "private_access_key",
+			Help:      "Sugarsync Private Access Key.\n\nLeave blank to use rclone's.",
+			Sensitive: true,
 		}, {
 			Name:    "hard_delete",
 			Help:    "Permanently delete files if true\notherwise put them in the deleted files.",
 			Default: false,
 		}, {
-			Name:     "refresh_token",
-			Help:     "Sugarsync refresh token.\n\nLeave blank normally, will be auto configured by rclone.",
-			Advanced: true,
+			Name:      "refresh_token",
+			Help:      "Sugarsync refresh token.\n\nLeave blank normally, will be auto configured by rclone.",
+			Advanced:  true,
+			Sensitive: true,
 		}, {
-			Name:     "authorization",
-			Help:     "Sugarsync authorization.\n\nLeave blank normally, will be auto configured by rclone.",
-			Advanced: true,
+			Name:      "authorization",
+			Help:      "Sugarsync authorization.\n\nLeave blank normally, will be auto configured by rclone.",
+			Advanced:  true,
+			Sensitive: true,
 		}, {
 			Name:     "authorization_expiry",
 			Help:     "Sugarsync authorization expiry.\n\nLeave blank normally, will be auto configured by rclone.",
 			Advanced: true,
 		}, {
-			Name:     "user",
-			Help:     "Sugarsync user.\n\nLeave blank normally, will be auto configured by rclone.",
-			Advanced: true,
+			Name:      "user",
+			Help:      "Sugarsync user.\n\nLeave blank normally, will be auto configured by rclone.",
+			Advanced:  true,
+			Sensitive: true,
 		}, {
-			Name:     "root_id",
-			Help:     "Sugarsync root id.\n\nLeave blank normally, will be auto configured by rclone.",
-			Advanced: true,
+			Name:      "root_id",
+			Help:      "Sugarsync root id.\n\nLeave blank normally, will be auto configured by rclone.",
+			Advanced:  true,
+			Sensitive: true,
 		}, {
-			Name:     "deleted_id",
-			Help:     "Sugarsync deleted folder id.\n\nLeave blank normally, will be auto configured by rclone.",
-			Advanced: true,
+			Name:      "deleted_id",
+			Help:      "Sugarsync deleted folder id.\n\nLeave blank normally, will be auto configured by rclone.",
+			Advanced:  true,
+			Sensitive: true,
 		}, {
 			Name:     config.ConfigEncoding,
 			Help:     config.ConfigEncodingHelp,
@@ -200,7 +209,7 @@ type Fs struct {
 	root       string             // the path we are working on
 	opt        Options            // parsed options
 	features   *fs.Features       // optional features
-	srv        *rest.Client       // the connection to the one drive server
+	srv        *rest.Client       // the connection to the server
 	dirCache   *dircache.DirCache // Map of directory path to directory id
 	pacer      *fs.Pacer          // pacer for API calls
 	m          configmap.Mapper   // config file access
@@ -713,7 +722,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 // Creates from the parameters passed in a half finished Object which
 // must have setMetaData called on it
 //
-// Returns the object, leaf, directoryID and error
+// Returns the object, leaf, directoryID and error.
 //
 // Used to create new objects
 func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time, size int64) (o *Object, leaf string, directoryID string, err error) {
@@ -732,7 +741,7 @@ func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time,
 
 // Put the object
 //
-// Copy the reader in to the new object which is returned
+// Copy the reader in to the new object which is returned.
 //
 // The new object may have been created if an error is returned
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
@@ -755,9 +764,9 @@ func (f *Fs) PutStream(ctx context.Context, in io.Reader, src fs.ObjectInfo, opt
 
 // PutUnchecked the object into the container
 //
-// This will produce an error if the object already exists
+// This will produce an error if the object already exists.
 //
-// Copy the reader in to the new object which is returned
+// Copy the reader in to the new object which is returned.
 //
 // The new object may have been created if an error is returned
 func (f *Fs) PutUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
@@ -852,27 +861,27 @@ func (f *Fs) Precision() time.Duration {
 
 // Copy src to this remote using server-side copy operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
 // If it isn't possible then return fs.ErrorCantCopy
-func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
+func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (dst fs.Object, err error) {
 	srcObj, ok := src.(*Object)
 	if !ok {
 		fs.Debugf(src, "Can't copy - not same remote type")
 		return nil, fs.ErrorCantCopy
 	}
-	err := srcObj.readMetaData(ctx)
+	err = srcObj.readMetaData(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	srcPath := srcObj.fs.rootSlash() + srcObj.remote
 	dstPath := f.rootSlash() + remote
-	if strings.ToLower(srcPath) == strings.ToLower(dstPath) {
+	if strings.EqualFold(srcPath, dstPath) {
 		return nil, fmt.Errorf("can't copy %q -> %q as are same name when lowercase", srcPath, dstPath)
 	}
 
@@ -881,6 +890,13 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	if err != nil {
 		return nil, err
 	}
+
+	// Find and remove existing object
+	cleanup, err := operations.RemoveExisting(ctx, f, remote, "server side copy")
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup(&err)
 
 	// Copy the object
 	opts := rest.Opts{
@@ -985,9 +1001,9 @@ func (f *Fs) moveDir(ctx context.Context, id, leaf, directoryID string) (err err
 
 // Move src to this remote using server-side move operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -1156,7 +1172,6 @@ func (o *Object) readMetaData(ctx context.Context) (err error) {
 
 // ModTime returns the modification time of the object
 //
-//
 // It attempts to read the objects mtime and if that isn't present the
 // LastModified returned in the http headers
 func (o *Object) ModTime(ctx context.Context) time.Time {
@@ -1229,7 +1244,7 @@ func (f *Fs) createFile(ctx context.Context, pathID, leaf, mimeType string) (new
 
 // Update the object with the contents of the io.Reader, modTime and size
 //
-// If existing is set then it updates the object rather than creating a new one
+// If existing is set then it updates the object rather than creating a new one.
 //
 // The new object may have been created if an error is returned
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
